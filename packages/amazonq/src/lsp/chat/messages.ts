@@ -32,6 +32,8 @@ import {
     getSerializedChatRequestType,
     listConversationsRequestType,
     conversationClickRequestType,
+    listMcpServersRequestType,
+    mcpServerClickRequestType,
     ShowSaveFileDialogRequestType,
     ShowSaveFileDialogParams,
     LSPErrorCodes,
@@ -94,6 +96,7 @@ export function registerLanguageServerEventListener(languageClient: LanguageClie
         const telemetryName: string = e.name
 
         if (telemetryName in telemetry) {
+            languageClient.info(`[Telemetry] Emitting ${telemetryName} telemetry: ${JSON.stringify(e.data)}`)
             telemetry[telemetryName as keyof TelemetryBase].emit(e.data)
         }
     })
@@ -312,6 +315,8 @@ export function registerMessageListeners(
             }
             case listConversationsRequestType.method:
             case conversationClickRequestType.method:
+            case listMcpServersRequestType.method:
+            case mcpServerClickRequestType.method:
             case tabBarActionRequestType.method:
                 await resolveChatResponse(message.command, message.params, languageClient, webview)
                 break
