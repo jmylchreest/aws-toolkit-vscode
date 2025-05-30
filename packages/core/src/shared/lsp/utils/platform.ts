@@ -13,6 +13,10 @@ export function getNodeExecutableName(): string {
     return process.platform === 'win32' ? 'node.exe' : 'node'
 }
 
+export function getRgExecutableName(): string {
+    return process.platform === 'win32' ? 'rg.exe' : 'rg'
+}
+
 /**
  * Get a json payload that will be sent to the language server, who is waiting to know what the encryption key is.
  * Code reference: https://github.com/aws/language-servers/blob/7da212185a5da75a72ce49a1a7982983f438651a/client/vscode/src/credentialsActivation.ts#L77
@@ -40,7 +44,7 @@ export async function validateNodeExe(nodePath: string[], lsp: string, args: str
     if (!ok) {
         const msg = `failed to run basic "node -e" test (exitcode=${r.exitCode}): ${proc.toString(false, true)}`
         logger.error(msg)
-        throw new ToolkitError(`amazonqLsp: ${msg}`)
+        throw new ToolkitError(`amazonqLsp: ${msg}`, { code: 'FailedToRunNode' })
     }
 
     // Check that we can start `node …/lsp.js --stdio …`.
@@ -68,7 +72,8 @@ export async function validateNodeExe(nodePath: string[], lsp: string, args: str
         })
         if (!ok2 || selfExit) {
             throw new ToolkitError(
-                `amazonqLsp: failed to run (exitcode=${lspProc.exitCode()}): ${lspProc.toString(false, true)}`
+                `amazonqLsp: failed to run (exitcode=${lspProc.exitCode()}): ${lspProc.toString(false, true)}`,
+                { code: 'FailedToStartLanguageServer' }
             )
         }
     } finally {

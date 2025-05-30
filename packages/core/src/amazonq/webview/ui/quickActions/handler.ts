@@ -308,6 +308,12 @@ export class QuickActionHandler {
         if (gumbyTabId !== undefined) {
             this.mynahUI.selectTab(gumbyTabId, eventId || '')
             this.connector.onTabChange(gumbyTabId)
+            this.mynahUI.notify({
+                duration: 5000,
+                title: 'Q CodeTransformation',
+                content:
+                    "Switched to the existing /transform tab; click 'Start a new transformation' below to run another transformation",
+            })
             return
         }
 
@@ -355,6 +361,8 @@ export class QuickActionHandler {
                 loadingChat: true,
                 cancelButtonWhenLoading: false,
             })
+        } else {
+            this.mynahUI.updateStore(affectedTabId, { promptInputOptions: [] })
         }
 
         if (affectedTabId && this.isHybridChatEnabled) {
