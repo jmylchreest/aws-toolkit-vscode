@@ -382,11 +382,14 @@ If you need to report an issue attach these to give the most detailed informatio
     - ![](./docs/images/logsView.png)
 2. Click the gear icon on the bottom right and select `Debug`
     - ![](./docs/images/logsSetDebug.png)
-3. Click the gear icon again and select `Set As Default`. This will ensure we stay in `Debug` until explicitly changed
+3. Click the gear icon again and select `Set As Default`. This will ensure we stay in `Debug` until explicitly changed.
     - ![](./docs/images/logsSetDefault.png)
 4. Open the Command Palette again and select `Reload Window`.
 5. Now you should see additional `[debug]` prefixed logs in the output.
     - ![](./docs/images/logsDebugLog.png)
+6. To export logs, click the kebab (`...`), select `Export Logs`, and then select the appropriate channel (`Amazon Q Logs` for Amazon Q)
+    - ![](./docs/images/openExportLogs.png)
+    - ![](./docs/images/exportAmazonQLogs.png)
 
 ### Telemetry
 

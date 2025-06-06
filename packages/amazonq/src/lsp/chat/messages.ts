@@ -32,6 +32,8 @@ import {
     getSerializedChatRequestType,
     listConversationsRequestType,
     conversationClickRequestType,
+    listMcpServersRequestType,
+    mcpServerClickRequestType,
     ShowSaveFileDialogRequestType,
     ShowSaveFileDialogParams,
     LSPErrorCodes,
@@ -51,6 +53,8 @@ import {
     CancellationTokenSource,
     chatUpdateNotificationType,
     ChatUpdateParams,
+    chatOptionsUpdateType,
+    ChatOptionsUpdateParams,
 } from '@aws/language-server-runtimes/protocol'
 import { v4 as uuidv4 } from 'uuid'
 import * as vscode from 'vscode'
@@ -94,6 +98,7 @@ export function registerLanguageServerEventListener(languageClient: LanguageClie
         const telemetryName: string = e.name
 
         if (telemetryName in telemetry) {
+            languageClient.info(`[Telemetry] Emitting ${telemetryName} telemetry: ${JSON.stringify(e.data)}`)
             telemetry[telemetryName as keyof TelemetryBase].emit(e.data)
         }
     })
@@ -312,6 +317,8 @@ export function registerMessageListeners(
             }
             case listConversationsRequestType.method:
             case conversationClickRequestType.method:
+            case listMcpServersRequestType.method:
+            case mcpServerClickRequestType.method:
             case tabBarActionRequestType.method:
                 await resolveChatResponse(message.command, message.params, languageClient, webview)
                 break
@@ -428,6 +435,21 @@ export function registerMessageListeners(
         async (params: ShowDocumentParams): Promise<ShowDocumentParams | ResponseError<ShowDocumentResult>> => {
             try {
                 const uri = vscode.Uri.parse(params.uri)
+
+                if (params.external) {
+                    // Note: Not using openUrl() because we probably don't want telemetry for these URLs.
+                    // Also it doesn't yet support the required HACK below.
+
+                    // HACK: workaround vscode bug: https://github.com/microsoft/vscode/issues/85930
+                    vscode.env.openExternal(params.uri as any).then(undefined, (e) => {
+                        // TODO: getLogger('?').error('failed vscode.env.openExternal: %O', e)
+                        vscode.env.openExternal(uri).then(undefined, (e) => {
+                            // TODO: getLogger('?').error('failed vscode.env.openExternal: %O', e)
+                        })
+                    })
+                    return params
+                }
+
                 const doc = await vscode.workspace.openTextDocument(uri)
                 await vscode.window.showTextDocument(doc, { preview: false })
                 return params
@@ -478,6 +500,13 @@ export function registerMessageListeners(
     languageClient.onNotification(chatUpdateNotificationType.method, (params: ChatUpdateParams) => {
         void provider.webview?.postMessage({
             command: chatUpdateNotificationType.method,
+            params: params,
+        })
+    })
+
+    languageClient.onNotification(chatOptionsUpdateType.method, (params: ChatOptionsUpdateParams) => {
+        void provider.webview?.postMessage({
+            command: chatOptionsUpdateType.method,
             params: params,
         })
     })
