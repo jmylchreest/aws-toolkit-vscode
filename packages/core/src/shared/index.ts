@@ -18,7 +18,7 @@ export * from './extensionUtilities'
 export * from './extensionStartup'
 export { RegionProvider } from './regions/regionProvider'
 export { Commands } from './vscode/commands2'
-export { getMachineId, getServiceEnvVarConfig, isAmazonInternalOs } from './vscode/env'
+export { getMachineId, getServiceEnvVarConfig, isAmazonLinux2 } from './vscode/env'
 export { getLogger } from './logger/logger'
 export { activateExtension, openUrl } from './utilities/vsCodeUtils'
 export { waitUntil, sleep, Timeout } from './utilities/timeoutUtils'
@@ -39,6 +39,7 @@ export {
     CodewhispererUserDecision,
     CodewhispererSecurityScan,
 } from './telemetry/telemetry.gen'
+export { ProxyUtil } from './utilities/proxyUtil'
 export { randomUUID } from './crypto'
 export * from './environmentVariables'
 export * from './vscode/setContext'
