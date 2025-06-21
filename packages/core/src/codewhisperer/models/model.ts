@@ -34,6 +34,10 @@ interface VsCodeState {
      */
     isCodeWhispererEditing: boolean
     /**
+     * Keeps track of whether or not recommendations are currently running
+     */
+    isRecommendationsActive: boolean
+    /**
      * Timestamp of previous user edit
      */
     lastUserModificationTime: number
@@ -44,6 +48,9 @@ interface VsCodeState {
 export const vsCodeState: VsCodeState = {
     isIntelliSenseActive: false,
     isCodeWhispererEditing: false,
+    // hack to globally keep track of whether or not recommendations are currently running. This allows us to know
+    // when recommendations have ran during e2e tests
+    isRecommendationsActive: false,
     lastUserModificationTime: 0,
     isFreeTierLimitReached: false,
 }
@@ -65,16 +72,6 @@ export type UtgStrategy = 'byName' | 'byContent'
 export type CrossFileStrategy = 'opentabs' | 'codemap' | 'bm25' | 'default'
 
 export type SupplementalContextStrategy = CrossFileStrategy | UtgStrategy | 'empty'
-
-export type PatchInfo = {
-    name: string
-    filename: string
-    isSuccessful: boolean
-}
-
-export type DescriptionContent = {
-    content: PatchInfo[]
-}
 
 export interface CodeWhispererSupplementalContext {
     isUtg: boolean
@@ -686,7 +683,8 @@ export class ZipManifest {
     version: string = '1.0'
     hilCapabilities: string[] = ['HIL_1pDependency_VersionUpgrade']
     // TO-DO: add 'CLIENT_SIDE_BUILD' here when releasing
-    transformCapabilities: string[] = ['EXPLAINABILITY_V1']
+    transformCapabilities: string[] = ['EXPLAINABILITY_V1', 'SELECTIVE_TRANSFORMATION_V2']
+    noInteractiveMode: boolean = true
     customBuildCommand: string = 'clean test'
     requestedConversions?: {
         sqlConversion?: {
@@ -756,8 +754,6 @@ export class TransformByQState {
     private sourceJDKVersion: JDKVersion | undefined = undefined
 
     private targetJDKVersion: JDKVersion | undefined = undefined
-
-    private produceMultipleDiffs: boolean = false
 
     private customBuildCommand: string = ''
 
@@ -853,10 +849,6 @@ export class TransformByQState {
 
     public getLinesOfCodeSubmitted() {
         return this.linesOfCodeSubmitted
-    }
-
-    public getMultipleDiffs() {
-        return this.produceMultipleDiffs
     }
 
     public getPreBuildLogFilePath() {
@@ -1035,10 +1027,6 @@ export class TransformByQState {
         this.linesOfCodeSubmitted = lines
     }
 
-    public setMultipleDiffs(produceMultipleDiffs: boolean) {
-        this.produceMultipleDiffs = produceMultipleDiffs
-    }
-
     public setStartTime(time: string) {
         this.startTime = time
     }
@@ -1181,7 +1169,6 @@ export class TransformByQState {
         this.buildLog = ''
         this.customBuildCommand = ''
         this.intervalId = undefined
-        this.produceMultipleDiffs = false
     }
 }
 

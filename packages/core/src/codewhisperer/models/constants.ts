@@ -22,23 +22,6 @@ export const AWSTemplateKeyWords = ['AWSTemplateFormatVersion', 'Resources', 'AW
 
 export const AWSTemplateCaseInsensitiveKeyWords = ['cloudformation', 'cfn', 'template', 'description']
 
-const patchDescriptions: { [key: string]: string } = {
-    'Prepare minimal upgrade to Java 17':
-        'This diff patch covers the set of upgrades for Springboot, JUnit, and PowerMockito frameworks in Java 17.',
-    'Prepare minimal upgrade to Java 21':
-        'This diff patch covers the set of upgrades for Springboot, JUnit, and PowerMockito frameworks in Java 21.',
-    'Popular Enterprise Specifications and Application Frameworks upgrade':
-        'This diff patch covers the set of upgrades for Jakarta EE 10, Hibernate 6.2, and Micronaut 3.',
-    'HTTP Client Utilities, Apache Commons Utilities, and Web Frameworks':
-        'This diff patch covers the set of upgrades for Apache HTTP Client 5, Apache Commons utilities (Collections, IO, Lang, Math), and Struts 6.0.',
-    'Testing Tools and Frameworks upgrade':
-        'This diff patch covers the set of upgrades for ArchUnit, Mockito, TestContainers, and Cucumber, in addition to the Jenkins plugins and the Maven Wrapper.',
-    'Miscellaneous Processing Documentation upgrade':
-        'This diff patch covers a diverse set of upgrades spanning ORMs, XML processing, API documentation, and more.',
-    'Deprecated API replacement, dependency upgrades, and formatting':
-        'This diff patch replaces deprecated APIs, makes additional dependency version upgrades, and formats code changes.',
-}
-
 export const JsonConfigFileNamingConvention = new Set([
     'app.json',
     'appsettings.json',
@@ -87,6 +70,9 @@ export const lineBreakWin = '\r\n'
 export const supplementalContextTimeoutInMs = 100
 
 export const supplementalContextMaxTotalLength = 20480
+
+export const editorStateMaxLength = 40000
+
 /**
  * Ux of recommendations
  */
@@ -152,7 +138,7 @@ export const runningSecurityScan = 'Reviewing project for code issues...'
 
 export const runningFileScan = 'Reviewing current file for code issues...'
 
-export const noSuggestions = 'No suggestions from Amazon Q'
+export const noInlineSuggestionsMsg = 'No suggestions from Amazon Q'
 
 export const licenseFilter = 'Amazon Q suggestions were filtered due to reference settings'
 
@@ -194,15 +180,9 @@ export const securityScanLearnMoreUri = 'https://docs.aws.amazon.com/amazonq/lat
 export const identityPoolID = 'us-east-1:70717e99-906f-4add-908c-bd9074a2f5b9'
 
 /**
- * the interval of the background thread invocation, which is triggered by the timer
+ * Delay for making requests once the user stops typing. Without a delay, inline suggestions request is triggered every keystroke.
  */
-export const defaultCheckPeriodMillis = 1000 * 60 * 5
-
-// suggestion show delay, in milliseconds
-export const suggestionShowDelay = 250
-
-// add 200ms more delay on top of inline default 30-50ms
-export const inlineSuggestionShowDelay = 200
+export const inlineCompletionsDebounceDelay = 200
 
 export const referenceLog = 'Code Reference Log'
 
@@ -669,27 +649,18 @@ export const enterJavaHomePlaceholder = 'Enter the path to your Java installatio
 
 export const openNewTabPlaceholder = 'Open a new tab to chat with Q'
 
-export const diffMessage = (multipleDiffs: boolean) => {
-    return multipleDiffs
-        ? 'You can review the diffs to see my proposed changes and accept or reject them. You will be able to accept changes from one diff at a time. If you reject changes in one diff, you will not be able to view or accept changes in the other diffs.'
-        : 'You can review the diff to see my proposed changes and accept or reject them.'
-}
+export const jobCompletedChatMessage =
+    'I completed your transformation. You can review the diff to see my proposed changes and accept or reject them. The transformation summary has details about the changes I am proposing. '
 
-export const jobCompletedChatMessage = (multipleDiffsString: string) => {
-    return `I completed your transformation. ${multipleDiffsString} The transformation summary has details about the changes I'm proposing.`
-}
+export const jobCompletedNotification =
+    'Amazon Q transformed your code. You can review the diff to see my proposed changes and accept or reject them. The transformation summary has details about the changes. '
 
-export const jobCompletedNotification = (multipleDiffsString: string) => {
-    return `Amazon Q transformed your code. ${multipleDiffsString} The transformation summary has details about the changes.`
-}
+export const upgradeLibrariesMessage =
+    'After successfully building in Java 17 or 21, an additional transformation is required to upgrade your libraries and dependencies. Choose the same source code version and target code version (for example, 17 to 17) to do this.'
 
-export const jobPartiallyCompletedChatMessage = (multipleDiffsString: string) => {
-    return `I transformed part of your code. ${multipleDiffsString} The transformation summary has details about the files I updated and the errors that prevented a complete transformation.`
-}
+export const jobPartiallyCompletedChatMessage = `I transformed part of your code. You can review the diff to see my proposed changes and accept or reject them. The transformation summary has details about the files I updated and the errors that prevented a complete transformation. `
 
-export const jobPartiallyCompletedNotification = (multipleDiffsString: string) => {
-    return `Amazon Q transformed part of your code. ${multipleDiffsString} The transformation summary has details about the files I updated and the errors that prevented a complete transformation.`
-}
+export const jobPartiallyCompletedNotification = `Amazon Q transformed part of your code. You can review the diff to see my proposed changes and accept or reject them. The transformation summary has details about the files I updated and the errors that prevented a complete transformation. `
 
 export const noPomXmlFoundChatMessage = `I couldn\'t find a project that I can upgrade. I couldn\'t find a pom.xml file in any of your open projects, nor could I find any embedded SQL statements. Currently, I can upgrade Java 8, 11, or 17 projects built on Maven, or Oracle SQL to PostgreSQL statements in Java projects. For more information, see the [Amazon Q documentation](${codeTransformPrereqDoc}).`
 
@@ -727,24 +698,7 @@ export const viewProposedChangesNotification =
 
 export const changesAppliedChatMessageOneDiff = 'I applied the changes to your project.'
 
-export const changesAppliedChatMessageMultipleDiffs = (
-    currentPatchIndex: number,
-    totalPatchFiles: number,
-    description: string | undefined
-) =>
-    description
-        ? `I applied the changes in diff patch ${currentPatchIndex + 1} of ${totalPatchFiles} to your project. ${patchDescriptions[description]}`
-        : 'I applied the changes to your project.'
-
 export const changesAppliedNotificationOneDiff = 'Amazon Q applied the changes to your project'
-
-export const changesAppliedNotificationMultipleDiffs = (currentPatchIndex: number, totalPatchFiles: number) => {
-    if (totalPatchFiles === 1) {
-        return 'Amazon Q applied the changes to your project.'
-    } else {
-        return `Amazon Q applied the changes in diff patch ${currentPatchIndex + 1} of ${totalPatchFiles} to your project.`
-    }
-}
 
 export const noOpenProjectsFoundChatMessage = `I couldn\'t find a project that I can upgrade. Currently, I support Java 8, Java 11, Java 17, and Java 21 projects built on Maven. Make sure your project is open in the IDE. For more information, see the [Amazon Q documentation](${codeTransformPrereqDoc}).`
 
@@ -773,7 +727,7 @@ export const cleanInstallErrorNotification = `Amazon Q could not run the Maven c
 export const enterJavaHomeChatMessage = 'Enter the path to JDK'
 
 export const projectPromptChatMessage =
-    'I can upgrade your Java project. To start the transformation, I need some information from you. Choose the project you want to upgrade and the target code version to upgrade to. Then, choose Confirm.'
+    'I can upgrade your Java project. To start the transformation, I need some information from you. Choose the project you want to upgrade and the target code version to upgrade to. Then, choose Confirm.\n\nAfter successfully building in Java 17 or 21, an additional transformation is required to upgrade your libraries and dependencies. Choose the same source code version and target code version (for example, 17 to 17) to do this.'
 
 export const windowsJavaHomeHelpChatMessage =
     'To find the JDK path, run the following commands in a new terminal: `cd "C:/Program Files/Java"` and then `dir`. If you see your JDK version, run `cd <version>` and then `cd` to show the path.'
@@ -804,20 +758,14 @@ export const chooseProjectSchemaFormMessage = 'To continue, choose the project a
 
 export const skipUnitTestsFormTitle = 'Choose to skip unit tests'
 
-export const selectiveTransformationFormTitle = 'Choose how to receive proposed changes'
-
 export const skipUnitTestsFormMessage =
     'I will build your project using `mvn clean test` by default. If you would like me to build your project without running unit tests, I will use `mvn clean test-compile`.'
 
 export const runUnitTestsMessage = 'Run unit tests'
 
-export const oneDiffMessage = 'One diff'
-
 export const doNotSkipUnitTestsBuildCommand = 'clean test'
 
 export const skipUnitTestsMessage = 'Skip unit tests'
-
-export const multipleDiffsMessage = 'Multiple diffs'
 
 export const skipUnitTestsBuildCommand = 'clean test-compile'
 

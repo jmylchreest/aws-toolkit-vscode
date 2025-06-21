@@ -18,6 +18,7 @@ import { AuthUtil } from 'aws-core-vscode/codewhisperer'
 import { Writable } from 'stream'
 import { onceChanged } from 'aws-core-vscode/utils'
 import { getLogger, oneMinute } from 'aws-core-vscode/shared'
+import { isSsoConnection } from 'aws-core-vscode/auth'
 
 export const encryptionKey = crypto.randomBytes(32)
 
@@ -76,8 +77,8 @@ export class AmazonQLspAuth {
      * @param force bypass memoization, and forcefully update the bearer token
      */
     async refreshConnection(force: boolean = false) {
-        const activeConnection = this.authUtil.auth.activeConnection
-        if (activeConnection?.state === 'valid' && activeConnection?.type === 'sso') {
+        const activeConnection = this.authUtil.conn
+        if (this.authUtil.isConnectionValid() && isSsoConnection(activeConnection)) {
             // send the token to the language server
             const token = await this.authUtil.getBearerToken()
             await (force ? this._updateBearerToken(token) : this.updateBearerToken(token))
@@ -95,6 +96,8 @@ export class AmazonQLspAuth {
             token,
         })
 
+        // "aws/credentials/token/update"
+        // https://github.com/aws/language-servers/blob/44d81f0b5754747d77bda60b40cc70950413a737/core/aws-lsp-core/src/credentials/credentialsProvider.ts#L27
         await this.client.sendRequest(bearerCredentialsUpdateRequestType.method, request)
 
         this.client.info(`UpdateBearerToken: ${JSON.stringify(request)}`)
@@ -118,7 +121,7 @@ export class AmazonQLspAuth {
             data: jwt,
             metadata: {
                 sso: {
-                    startUrl: AuthUtil.instance.auth.startUrl,
+                    startUrl: AuthUtil.instance.startUrl,
                 },
             },
             encrypted: true,

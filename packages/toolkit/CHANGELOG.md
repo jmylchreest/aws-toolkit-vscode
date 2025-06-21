@@ -1,3 +1,31 @@
+## 3.66.0 2025-06-18
+
+- Miscellaneous non-user-facing changes
+
+## 3.65.0 2025-06-13
+
+- Miscellaneous non-user-facing changes
+
+## 3.64.0 2025-06-04
+
+- Miscellaneous non-user-facing changes
+
+## 3.63.0 2025-05-22
+
+- Miscellaneous non-user-facing changes
+
+## 3.62.0 2025-05-15
+
+- Miscellaneous non-user-facing changes
+
+## 3.61.0 2025-05-14
+
+- Miscellaneous non-user-facing changes
+
+## 3.60.0 2025-05-06
+
+- Miscellaneous non-user-facing changes
+
 ## 3.59.0 2025-05-05
 
 - Miscellaneous non-user-facing changes
