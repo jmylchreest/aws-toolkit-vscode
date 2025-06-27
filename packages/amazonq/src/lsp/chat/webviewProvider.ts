@@ -19,10 +19,12 @@ import {
     AmazonQPromptSettings,
     LanguageServerResolver,
     amazonqMark,
+    getLogger,
 } from 'aws-core-vscode/shared'
 import { AuthUtil, RegionProfile } from 'aws-core-vscode/codewhisperer'
 import { featureConfig } from 'aws-core-vscode/amazonq'
 import { getAmazonQLspConfig } from '../config'
+import { LanguageClient } from 'vscode-languageclient'
 
 export class AmazonQChatViewProvider implements WebviewViewProvider {
     public static readonly viewType = 'aws.amazonq.AmazonQChatView'
@@ -35,7 +37,10 @@ export class AmazonQChatViewProvider implements WebviewViewProvider {
     connectorAdapterPath?: string
     uiPath?: string
 
-    constructor(private readonly mynahUIPath: string) {}
+    constructor(
+        private readonly mynahUIPath: string,
+        private readonly languageClient: LanguageClient
+    ) {}
 
     public async resolveWebviewView(
         webviewView: WebviewView,
@@ -44,9 +49,12 @@ export class AmazonQChatViewProvider implements WebviewViewProvider {
     ) {
         const lspDir = Uri.file(LanguageServerResolver.defaultDir())
         const dist = Uri.joinPath(globals.context.extensionUri, 'dist')
-
-        const resourcesRoots = [lspDir, dist]
-
+        const bundledResources = Uri.joinPath(globals.context.extensionUri, 'resources/language-server')
+        let resourcesRoots = [lspDir, dist]
+        if (this.mynahUIPath?.startsWith(globals.context.extensionUri.fsPath)) {
+            getLogger('amazonqLsp').info(`Using bundled webview resources ${bundledResources.fsPath}`)
+            resourcesRoots = [bundledResources, dist]
+        }
         /**
          * if the mynah chat client is defined, then make sure to add it to the resource roots, otherwise
          * it will 401 when trying to load
@@ -91,6 +99,8 @@ export class AmazonQChatViewProvider implements WebviewViewProvider {
         const pairProgrammingAcknowledged =
             !AmazonQPromptSettings.instance.isPromptEnabled('amazonQChatPairProgramming')
         const welcomeCount = globals.globalState.tryGet('aws.amazonq.welcomeChatShowCount', Number, 0)
+        const modelSelectionEnabled =
+            this.languageClient.initializeResult?.awsServerCapabilities?.chatOptions?.modelSelection ?? false
 
         // only show profile card when the two conditions
         //  1. profile count >= 2
@@ -139,14 +149,14 @@ export class AmazonQChatViewProvider implements WebviewViewProvider {
                     const vscodeApi = acquireVsCodeApi()
                     const hybridChatConnector = new HybridChatAdapter(${(await AuthUtil.instance.getChatAuthState()).amazonQ === 'connected'},${featureConfigData},${welcomeCount},${disclaimerAcknowledged},${regionProfileString},${disabledCommands},${isSMUS},${isSM},vscodeApi.postMessage)
                     const commands = [hybridChatConnector.initialQuickActions[0]]
-                    qChat = amazonQChat.createChat(vscodeApi, {disclaimerAcknowledged: ${disclaimerAcknowledged}, pairProgrammingAcknowledged: ${pairProgrammingAcknowledged}, agenticMode: true, quickActionCommands: commands}, hybridChatConnector, ${JSON.stringify(featureConfigData)});
+                    qChat = amazonQChat.createChat(vscodeApi, {disclaimerAcknowledged: ${disclaimerAcknowledged}, pairProgrammingAcknowledged: ${pairProgrammingAcknowledged}, agenticMode: true, quickActionCommands: commands, modelSelectionEnabled: ${modelSelectionEnabled}}, hybridChatConnector, ${JSON.stringify(featureConfigData)});
                 }
                 window.addEventListener('message', (event) => {
                     /**
                      * special handler that "simulates" reloading the webview when a profile changes.
                      * required because chat-client relies on initializedResult from the lsp that
                      * are only sent once
-                     * 
+                     *
                      * References:
                      *   closing tabs: https://github.com/aws/mynah-ui/blob/de736b52f369ba885cd19f33ac86c6f57b4a3134/docs/USAGE.md#removing-a-tab-programmatically-
                      *   opening tabs: https://github.com/aws/aws-toolkit-vscode/blob/c22efa03e73b241564c8051c35761eb8620edb83/packages/amazonq/test/e2e/amazonq/framework/framework.ts#L98

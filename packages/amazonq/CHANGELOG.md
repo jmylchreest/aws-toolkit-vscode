@@ -1,3 +1,68 @@
+## 1.79.0 2025-06-25
+
+- **Bug Fix** Added automatic system certificate detection and VSCode proxy settings support
+- **Bug Fix** Improved Amazon Linux 2 support with better SageMaker environment detection
+- **Feature** /transform: run all builds client-side
+
+## 1.78.0 2025-06-20
+
+- **Bug Fix** Resolve missing chat options in Amazon Q chat interface.
+
+## 1.77.0 2025-06-18
+
+- Miscellaneous non-user-facing changes
+
+## 1.76.0 2025-06-18
+
+- **Bug Fix** /transform: only show lines of code statistic in plan
+- **Feature** Add model selection feature
+- **Feature** Pin context items in chat and manage workspace rules
+
+## 1.75.0 2025-06-13
+
+- Miscellaneous non-user-facing changes
+
+## 1.74.0 2025-06-12
+
+- Miscellaneous non-user-facing changes
+
+## 1.73.0 2025-06-11
+
+- **Feature** Add MCP Server Support
+
+## 1.72.0 2025-06-11
+
+- **Feature** Launch LSP with bundled artifacts as fallback
+
+## 1.71.0 2025-06-04
+
+- Miscellaneous non-user-facing changes
+
+## 1.70.0 2025-05-28
+
+- **Removal** Disable local workspace LSP
+
+## 1.69.0 2025-05-22
+
+- **Bug Fix** /transform: avoid prompting user for target JDK path unnecessarily
+- **Removal** /transform: remove option to select multiple diffs
+
+## 1.68.0 2025-05-15
+
+- **Bug Fix** Fix Error: 'Amazon Q service is not signed in'
+- **Bug Fix** Fix Error: 'Amazon Q Profile is not selected for IDC connection type'
+- **Feature** Add inline completion support for abap language
+
+## 1.67.0 2025-05-14
+
+- **Bug Fix** Previous and subsequent cells are used as context for completion in a Jupyter notebook
+- **Bug Fix** Support chat in AL2 aarch64
+
+## 1.66.0 2025-05-09
+
+- **Bug Fix** Avoid inline completion 'Improperly formed request' errors when file is too large
+- **Bug Fix** Named agent tabs sometimes open with unnecessary input options
+
 ## 1.65.0 2025-05-05
 
 - **Feature** Support selecting customizations across all Q profiles with automatic profile switching for enterprise users

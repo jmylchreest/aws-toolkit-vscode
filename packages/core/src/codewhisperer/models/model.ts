@@ -34,6 +34,10 @@ interface VsCodeState {
      */
     isCodeWhispererEditing: boolean
     /**
+     * Keeps track of whether or not recommendations are currently running
+     */
+    isRecommendationsActive: boolean
+    /**
      * Timestamp of previous user edit
      */
     lastUserModificationTime: number
@@ -44,6 +48,9 @@ interface VsCodeState {
 export const vsCodeState: VsCodeState = {
     isIntelliSenseActive: false,
     isCodeWhispererEditing: false,
+    // hack to globally keep track of whether or not recommendations are currently running. This allows us to know
+    // when recommendations have ran during e2e tests
+    isRecommendationsActive: false,
     lastUserModificationTime: 0,
     isFreeTierLimitReached: false,
 }
@@ -65,16 +72,6 @@ export type UtgStrategy = 'byName' | 'byContent'
 export type CrossFileStrategy = 'opentabs' | 'codemap' | 'bm25' | 'default'
 
 export type SupplementalContextStrategy = CrossFileStrategy | UtgStrategy | 'empty'
-
-export type PatchInfo = {
-    name: string
-    filename: string
-    isSuccessful: boolean
-}
-
-export type DescriptionContent = {
-    content: PatchInfo[]
-}
 
 export interface CodeWhispererSupplementalContext {
     isUtg: boolean
@@ -678,15 +675,15 @@ export enum BuildSystem {
     Unknown = 'Unknown',
 }
 
-// TO-DO: include the custom YAML file path here somewhere?
 export class ZipManifest {
     sourcesRoot: string = 'sources/'
     dependenciesRoot: string = 'dependencies/'
-    buildLogs: string = 'build-logs.txt'
     version: string = '1.0'
     hilCapabilities: string[] = ['HIL_1pDependency_VersionUpgrade']
-    // TO-DO: add 'CLIENT_SIDE_BUILD' here when releasing
-    transformCapabilities: string[] = ['EXPLAINABILITY_V1']
+    transformCapabilities: string[] = ['EXPLAINABILITY_V1', 'SELECTIVE_TRANSFORMATION_V2', 'CLIENT_SIDE_BUILD']
+    noInteractiveMode: boolean = true
+    dependencyUpgradeConfigFile?: string = undefined
+    compilationsJsonFile: string = 'compilations.json'
     customBuildCommand: string = 'clean test'
     requestedConversions?: {
         sqlConversion?: {
@@ -757,8 +754,6 @@ export class TransformByQState {
 
     private targetJDKVersion: JDKVersion | undefined = undefined
 
-    private produceMultipleDiffs: boolean = false
-
     private customBuildCommand: string = ''
 
     private sourceDB: DB | undefined = undefined
@@ -786,7 +781,7 @@ export class TransformByQState {
 
     private polledJobStatus: string = ''
 
-    private jobFailureMetadata: string = ''
+    private hasSeenTransforming: boolean = false
 
     private payloadFilePath: string = ''
 
@@ -835,6 +830,10 @@ export class TransformByQState {
         return this.transformByQState === TransformByQStatus.PartiallySucceeded
     }
 
+    public getHasSeenTransforming() {
+        return this.hasSeenTransforming
+    }
+
     public getTransformationType() {
         return this.transformationType
     }
@@ -853,10 +852,6 @@ export class TransformByQState {
 
     public getLinesOfCodeSubmitted() {
         return this.linesOfCodeSubmitted
-    }
-
-    public getMultipleDiffs() {
-        return this.produceMultipleDiffs
     }
 
     public getPreBuildLogFilePath() {
@@ -929,10 +924,6 @@ export class TransformByQState {
 
     public getProjectCopyFilePath() {
         return this.projectCopyFilePath
-    }
-
-    public getJobFailureMetadata() {
-        return this.jobFailureMetadata
     }
 
     public getPayloadFilePath() {
@@ -1015,6 +1006,10 @@ export class TransformByQState {
         this.transformByQState = TransformByQStatus.PartiallySucceeded
     }
 
+    public setHasSeenTransforming(hasSeen: boolean) {
+        this.hasSeenTransforming = hasSeen
+    }
+
     public setTransformationType(type: TransformationType) {
         this.transformationType = type
     }
@@ -1033,10 +1028,6 @@ export class TransformByQState {
 
     public setLinesOfCodeSubmitted(lines: number) {
         this.linesOfCodeSubmitted = lines
-    }
-
-    public setMultipleDiffs(produceMultipleDiffs: boolean) {
-        this.produceMultipleDiffs = produceMultipleDiffs
     }
 
     public setStartTime(time: string) {
@@ -1103,10 +1094,6 @@ export class TransformByQState {
         this.projectCopyFilePath = filePath
     }
 
-    public setJobFailureMetadata(data: string) {
-        this.jobFailureMetadata = data
-    }
-
     public setPayloadFilePath(payloadFilePath: string) {
         this.payloadFilePath = payloadFilePath
     }
@@ -1165,9 +1152,9 @@ export class TransformByQState {
 
     public setJobDefaults() {
         this.setToNotStarted()
+        this.hasSeenTransforming = false
         this.jobFailureErrorNotification = undefined
         this.jobFailureErrorChatMessage = undefined
-        this.jobFailureMetadata = ''
         this.payloadFilePath = ''
         this.metadataPathSQL = ''
         this.customVersionPath = ''
@@ -1181,7 +1168,6 @@ export class TransformByQState {
         this.buildLog = ''
         this.customBuildCommand = ''
         this.intervalId = undefined
-        this.produceMultipleDiffs = false
     }
 }
 
