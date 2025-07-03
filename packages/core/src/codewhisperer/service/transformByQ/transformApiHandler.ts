@@ -40,21 +40,20 @@ import { CodeTransformTelemetryState } from '../../../amazonqGumby/telemetry/cod
 import { calculateTotalLatency } from '../../../amazonqGumby/telemetry/codeTransformTelemetry'
 import { MetadataResult } from '../../../shared/telemetry/telemetryClient'
 import request from '../../../shared/request'
-import { JobStoppedError, ZipExceedsSizeLimitError } from '../../../amazonqGumby/errors'
+import { JobStoppedError } from '../../../amazonqGumby/errors'
 import { createLocalBuildUploadZip, extractOriginalProjectSources, writeAndShowBuildLogs } from './transformFileHandler'
 import { createCodeWhispererChatStreamingClient } from '../../../shared/clients/codewhispererChatClient'
 import { downloadExportResultArchive } from '../../../shared/utilities/download'
 import { ExportContext, ExportIntent, TransformationDownloadArtifactType } from '@amzn/codewhisperer-streaming'
 import fs from '../../../shared/fs/fs'
-import { ChatSessionManager } from '../../../amazonqGumby/chat/storages/chatSession'
 import { encodeHTML } from '../../../shared/utilities/textUtilities'
 import { convertToTimeString } from '../../../shared/datetime'
 import { getAuthType } from '../../../auth/utils'
 import { UserWrittenCodeTracker } from '../../tracker/userWrittenCodeTracker'
+import { setContext } from '../../../shared/vscode/setContext'
 import { AuthUtil } from '../../util/authUtil'
 import { DiffModel } from './transformationResultsViewProvider'
 import { spawnSync } from 'child_process' // eslint-disable-line no-restricted-imports
-import { isClientSideBuildEnabled } from '../../../dev/config'
 
 export function getSha256(buffer: Buffer) {
     const hasher = crypto.createHash('sha256')
@@ -186,12 +185,13 @@ export async function stopJob(jobId: string) {
         return
     }
 
+    getLogger().info(`CodeTransformation: Stopping transformation job with ID: ${jobId}`)
+
     try {
         await codeWhisperer.codeWhispererClient.codeModernizerStopCodeTransformation({
             transformationJobId: jobId,
         })
     } catch (e: any) {
-        transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
         getLogger().error(`CodeTransformation: StopTransformation error = %O`, e)
         throw new Error('Stop job failed')
     }
@@ -217,7 +217,6 @@ export async function uploadPayload(
         })
     } catch (e: any) {
         const errorMessage = `Creating the upload URL failed due to: ${(e as Error).message}`
-        transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
         getLogger().error(`CodeTransformation: CreateUploadUrl error: = %O`, e)
         throw new Error(errorMessage)
     }
@@ -308,24 +307,20 @@ export function createZipManifest({ hilZipParams }: IZipManifestParams) {
 
 interface IZipCodeParams {
     dependenciesFolder?: FolderInfo
-    humanInTheLoopFlag?: boolean
     projectPath?: string
     zipManifest: ZipManifest | HilZipManifest
 }
 
 interface ZipCodeResult {
-    dependenciesCopied: boolean
     tempFilePath: string
     fileSize: number
 }
 
 export async function zipCode(
-    { dependenciesFolder, humanInTheLoopFlag, projectPath, zipManifest }: IZipCodeParams,
+    { dependenciesFolder, projectPath, zipManifest }: IZipCodeParams,
     zip: AdmZip = new AdmZip()
 ) {
     let tempFilePath = undefined
-    let logFilePath = undefined
-    let dependenciesCopied = false
     try {
         throwIfCancelled()
 
@@ -345,10 +340,6 @@ export async function zipCode(
                 sourceFilesSize += (await nodefs.promises.stat(file)).size
             }
             getLogger().info(`CodeTransformation: source code files size = ${sourceFilesSize}`)
-        }
-
-        if (transformByQState.getMultipleDiffs() && zipManifest instanceof ZipManifest) {
-            zipManifest.transformCapabilities.push('SELECTIVE_TRANSFORMATION_V1')
         }
 
         if (
@@ -387,65 +378,48 @@ export async function zipCode(
                     continue
                 }
                 const relativePath = path.relative(dependenciesFolder.path, file)
-                // const paddedPath = path.join(`dependencies/${dependenciesFolder.name}`, relativePath)
-                const paddedPath = path.join(`dependencies/`, relativePath)
-                zip.addLocalFile(file, path.dirname(paddedPath))
+                if (relativePath.includes('compilations.json')) {
+                    let fileContents = await nodefs.promises.readFile(file, 'utf-8')
+                    if (os.platform() === 'win32') {
+                        fileContents = fileContents.replace(/\\\\/g, '/')
+                    }
+                    zip.addFile('compilations.json', Buffer.from(fileContents, 'utf-8'))
+                } else {
+                    zip.addLocalFile(file, path.dirname(relativePath))
+                }
                 dependencyFilesSize += (await nodefs.promises.stat(file)).size
             }
             getLogger().info(`CodeTransformation: dependency files size = ${dependencyFilesSize}`)
-            dependenciesCopied = true
         }
 
-        // TO-DO: decide where exactly to put the YAML file / what to name it
         if (transformByQState.getCustomDependencyVersionFilePath() && zipManifest instanceof ZipManifest) {
             zip.addLocalFile(
                 transformByQState.getCustomDependencyVersionFilePath(),
-                'custom-upgrades',
-                'dependency-versions.yaml'
+                'sources',
+                'dependency_upgrade.yml'
             )
+            zipManifest.dependencyUpgradeConfigFile = 'dependency_upgrade.yml'
         }
 
         zip.addFile('manifest.json', Buffer.from(JSON.stringify(zipManifest)), 'utf-8')
 
         throwIfCancelled()
 
-        // add text file with logs from mvn clean install and mvn copy-dependencies
-        logFilePath = await writeAndShowBuildLogs()
-        // We don't add build-logs.txt file to the manifest if we are
-        // uploading HIL artifacts
-        if (!humanInTheLoopFlag) {
-            zip.addLocalFile(logFilePath)
-        }
-
         tempFilePath = path.join(os.tmpdir(), 'zipped-code.zip')
         await fs.writeFile(tempFilePath, zip.toBuffer())
-        if (dependenciesFolder && (await fs.exists(dependenciesFolder.path))) {
+        if (dependenciesFolder?.path) {
             await fs.delete(dependenciesFolder.path, { recursive: true, force: true })
         }
     } catch (e: any) {
         getLogger().error(`CodeTransformation: zipCode error = ${e}`)
         throw Error('Failed to zip project')
-    } finally {
-        if (logFilePath) {
-            await fs.delete(logFilePath)
-        }
     }
 
-    const zipSize = (await nodefs.promises.stat(tempFilePath)).size
+    const fileSize = (await nodefs.promises.stat(tempFilePath)).size
 
-    const exceedsLimit = zipSize > CodeWhispererConstants.uploadZipSizeLimitInBytes
+    getLogger().info(`CodeTransformation: created ZIP of size ${fileSize} at ${tempFilePath}`)
 
-    getLogger().info(`CodeTransformation: created ZIP of size ${zipSize} at ${tempFilePath}`)
-
-    if (exceedsLimit) {
-        void vscode.window.showErrorMessage(CodeWhispererConstants.projectSizeTooLargeNotification)
-        transformByQState.getChatControllers()?.transformationFinished.fire({
-            message: CodeWhispererConstants.projectSizeTooLargeChatMessage,
-            tabID: ChatSessionManager.Instance.getSession().tabID,
-        })
-        throw new ZipExceedsSizeLimitError()
-    }
-    return { dependenciesCopied: dependenciesCopied, tempFilePath: tempFilePath, fileSize: zipSize } as ZipCodeResult
+    return { tempFilePath: tempFilePath, fileSize: fileSize } as ZipCodeResult
 }
 
 export async function startJob(uploadId: string, profile: RegionProfile | undefined) {
@@ -468,7 +442,6 @@ export async function startJob(uploadId: string, profile: RegionProfile | undefi
         return response.transformationJobId
     } catch (e: any) {
         const errorMessage = `Starting the job failed due to: ${(e as Error).message}`
-        transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
         getLogger().error(`CodeTransformation: StartTransformation error = %O`, e)
         throw new Error(errorMessage)
     }
@@ -521,20 +494,33 @@ export function getFormattedString(s: string) {
     return CodeWhispererConstants.formattedStringMap.get(s) ?? s
 }
 
-export function addTableMarkdown(plan: string, stepId: string, tableMapping: { [key: string]: string }) {
-    const tableObj = tableMapping[stepId]
-    if (!tableObj) {
-        // no table present for this step
+export function addTableMarkdown(plan: string, stepId: string, tableMapping: { [key: string]: string[] }) {
+    const tableObjects = tableMapping[stepId]
+    if (!tableObjects || tableObjects.length === 0 || tableObjects.every((table: string) => table === '')) {
+        // no tables for this stepId
         return plan
     }
-    const table = JSON.parse(tableObj)
-    if (table.rows.length === 0) {
-        // empty table
-        plan += `\n\nThere are no ${table.name.toLowerCase()} to display.\n\n`
+    const tables: any[] = []
+    // eslint-disable-next-line unicorn/no-array-for-each
+    tableObjects.forEach((tableObj: string) => {
+        try {
+            const table = JSON.parse(tableObj)
+            if (table) {
+                tables.push(table)
+            }
+        } catch (e) {
+            getLogger().error(`CodeTransformation: Failed to parse table JSON, skipping: ${e}`)
+        }
+    })
+
+    if (tables.every((table: any) => table.rows.length === 0)) {
+        // empty tables for this stepId
+        plan += `\n\nThere are no ${tables[0].name.toLowerCase()} to display.\n\n`
         return plan
     }
-    plan += `\n\n\n${table.name}\n|`
-    const columns = table.columnNames
+    // table name and columns are shared, so only add to plan once
+    plan += `\n\n\n${tables[0].name}\n|`
+    const columns = tables[0].columnNames
     // eslint-disable-next-line unicorn/no-array-for-each
     columns.forEach((columnName: string) => {
         plan += ` ${getFormattedString(columnName)} |`
@@ -544,16 +530,21 @@ export function addTableMarkdown(plan: string, stepId: string, tableMapping: { [
     columns.forEach((_: any) => {
         plan += '-----|'
     })
+    // add all rows of all tables
     // eslint-disable-next-line unicorn/no-array-for-each
-    table.rows.forEach((row: any) => {
-        plan += '\n|'
+    tables.forEach((table: any) => {
         // eslint-disable-next-line unicorn/no-array-for-each
-        columns.forEach((columnName: string) => {
-            if (columnName === 'relativePath') {
-                plan += ` [${row[columnName]}](${row[columnName]}) |` // add MD link only for files
-            } else {
-                plan += ` ${row[columnName]} |`
-            }
+        table.rows.forEach((row: any) => {
+            plan += '\n|'
+            // eslint-disable-next-line unicorn/no-array-for-each
+            columns.forEach((columnName: string) => {
+                if (columnName === 'relativePath') {
+                    // add markdown link only for file paths
+                    plan += ` [${row[columnName]}](${row[columnName]}) |`
+                } else {
+                    plan += ` ${row[columnName]} |`
+                }
+            })
         })
     })
     plan += '\n\n'
@@ -561,11 +552,13 @@ export function addTableMarkdown(plan: string, stepId: string, tableMapping: { [
 }
 
 export function getTableMapping(stepZeroProgressUpdates: ProgressUpdates) {
-    const map: { [key: string]: string } = {}
+    const map: { [key: string]: string[] } = {}
     for (const update of stepZeroProgressUpdates) {
-        // description should never be undefined since even if no data we show an empty table
-        // but just in case, empty string allows us to skip this table without errors when rendering
-        map[update.name] = update.description ?? ''
+        if (!map[update.name]) {
+            map[update.name] = []
+        }
+        // empty string allows us to skip this table when rendering
+        map[update.name].push(update.description ?? '')
     }
     return map
 }
@@ -578,9 +571,11 @@ export function getJobStatisticsHtml(jobStatistics: any) {
     htmlString += `<div style="flex: 1; margin-left: 20px; border: 1px solid #424750; border-radius: 8px; padding: 10px;">`
     // eslint-disable-next-line unicorn/no-array-for-each
     jobStatistics.forEach((stat: { name: string; value: string }) => {
-        htmlString += `<p style="margin-bottom: 4px"><img src="${getTransformationIcon(
-            stat.name
-        )}" style="vertical-align: middle;"> ${getFormattedString(stat.name)}: ${stat.value}</p>`
+        if (stat.name === 'linesOfCode') {
+            htmlString += `<p style="margin-bottom: 4px"><img src="${getTransformationIcon(
+                stat.name
+            )}" style="vertical-align: middle;"> ${getFormattedString(stat.name)}: ${stat.value}</p>`
+        }
     })
     htmlString += `</div>`
     return htmlString
@@ -604,7 +599,7 @@ export async function getTransformationPlan(jobId: string, profile: RegionProfil
         // gets a mapping between the ID ('name' field) of each progressUpdate (substep) and the associated table
         const tableMapping = getTableMapping(stepZeroProgressUpdates)
 
-        const jobStatistics = JSON.parse(tableMapping['0']).rows // ID of '0' reserved for job statistics table
+        const jobStatistics = JSON.parse(tableMapping['0'][0]).rows // ID of '0' reserved for job statistics table; only 1 table there
 
         // get logo directly since we only use one logo regardless of color theme
         const logoIcon = getTransformationIcon('transformLogo')
@@ -630,17 +625,12 @@ export async function getTransformationPlan(jobId: string, profile: RegionProfil
             plan += `</div><br>`
         }
         plan += `</div><br>`
-        plan += `<p style="font-size: 18px; margin-bottom: 4px;"><b>Appendix</b><br><a href="#top" style="float: right; font-size: 14px;">Scroll to top <img src="${arrowIcon}" style="vertical-align: middle;"></a></p><br>`
-        plan = addTableMarkdown(plan, '-1', tableMapping) // ID of '-1' reserved for appendix table
         return plan
     } catch (e: any) {
         const errorMessage = (e as Error).message
-        transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
         getLogger().error(`CodeTransformation: GetTransformationPlan error = %O`, e)
 
-        /* Means API call failed
-         * If response is defined, means a display/parsing error occurred, so continue transformation
-         */
+        // GetTransformationPlan API call failed, but if response is defined, a display/parsing error occurred, so continue transformation
         if (response === undefined) {
             throw new Error(errorMessage)
         }
@@ -655,7 +645,6 @@ export async function getTransformationSteps(jobId: string, profile: RegionProfi
         })
         return response.transformationPlan.transformationSteps.slice(1) // skip step 0 (contains supplemental info)
     } catch (e: any) {
-        transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
         getLogger().error(`CodeTransformation: GetTransformationPlan error = %O`, e)
         throw e
     }
@@ -663,6 +652,7 @@ export async function getTransformationSteps(jobId: string, profile: RegionProfi
 
 export async function pollTransformationJob(jobId: string, validStates: string[], profile: RegionProfile | undefined) {
     let status: string = ''
+    let isPlanComplete = false
     while (true) {
         throwIfCancelled()
         try {
@@ -673,6 +663,9 @@ export async function pollTransformationJob(jobId: string, validStates: string[]
             status = response.transformationJob.status!
             if (CodeWhispererConstants.validStatesForBuildSucceeded.includes(status)) {
                 jobPlanProgress['buildCode'] = StepProgress.Succeeded
+            }
+            if (status === 'TRANSFORMING') {
+                transformByQState.setHasSeenTransforming(true)
             }
             // emit metric when job status changes
             if (status !== transformByQState.getPolledJobStatus()) {
@@ -699,14 +692,34 @@ export async function pollTransformationJob(jobId: string, validStates: string[]
                     `${CodeWhispererConstants.failedToCompleteJobGenericNotification} ${errorMessage}`
                 )
             }
+
+            if (
+                CodeWhispererConstants.validStatesForPlanGenerated.includes(status) &&
+                transformByQState.getTransformationType() === TransformationType.LANGUAGE_UPGRADE &&
+                !isPlanComplete
+            ) {
+                const plan = await openTransformationPlan(jobId, profile)
+                if (plan?.toLowerCase().includes('dependency changes')) {
+                    // final plan is complete; show to user
+                    isPlanComplete = true
+                }
+                // for JDK upgrades without a YAML file, we show a static plan so no need to keep refreshing it
+                if (
+                    plan &&
+                    transformByQState.getSourceJDKVersion() !== transformByQState.getTargetJDKVersion() &&
+                    !transformByQState.getCustomDependencyVersionFilePath()
+                ) {
+                    isPlanComplete = true
+                }
+            }
+
             if (validStates.includes(status)) {
                 break
             }
 
-            // TO-DO: remove isClientSideBuildEnabled when releasing CSB
+            // TO-DO: later, handle case where PlannerAgent needs to run mvn dependency:tree during PLANNING stage; not needed for now
             if (
-                isClientSideBuildEnabled &&
-                status === 'TRANSFORMING' &&
+                transformByQState.getHasSeenTransforming() &&
                 transformByQState.getTransformationType() === TransformationType.LANGUAGE_UPGRADE
             ) {
                 // client-side build is N/A for SQL conversions
@@ -731,11 +744,36 @@ export async function pollTransformationJob(jobId: string, validStates: string[]
             await sleep(CodeWhispererConstants.transformationJobPollingIntervalSeconds * 1000)
         } catch (e: any) {
             getLogger().error(`CodeTransformation: GetTransformation error = %O`, e)
-            transformByQState.setJobFailureMetadata(` (request ID: ${e.requestId ?? 'unavailable'})`)
             throw e
         }
     }
     return status
+}
+
+async function openTransformationPlan(jobId: string, profile?: RegionProfile) {
+    let plan = undefined
+    try {
+        plan = await getTransformationPlan(jobId, profile)
+    } catch (error) {
+        // means API call failed
+        getLogger().error(`CodeTransformation: ${CodeWhispererConstants.failedToCompleteJobNotification}`, error)
+        transformByQState.setJobFailureErrorNotification(
+            `${CodeWhispererConstants.failedToGetPlanNotification} ${(error as Error).message}`
+        )
+        transformByQState.setJobFailureErrorChatMessage(
+            `${CodeWhispererConstants.failedToGetPlanChatMessage} ${(error as Error).message}`
+        )
+        throw new Error('Get plan failed')
+    }
+
+    if (plan) {
+        const planFilePath = path.join(transformByQState.getProjectPath(), 'transformation-plan.md')
+        nodefs.writeFileSync(planFilePath, plan)
+        await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(planFilePath))
+        transformByQState.setPlanFilePath(planFilePath)
+        await setContext('gumby.isPlanAvailable', true)
+    }
+    return plan
 }
 
 async function attemptLocalBuild() {
@@ -787,17 +825,24 @@ async function processClientInstructions(jobId: string, clientInstructionsPath: 
     const destinationPath = path.join(os.tmpdir(), `originalCopy_${jobId}_${artifactId}`)
     await extractOriginalProjectSources(destinationPath)
     getLogger().info(`CodeTransformation: copied project to ${destinationPath}`)
-    const diffModel = new DiffModel()
-    diffModel.parseDiff(clientInstructionsPath, path.join(destinationPath, 'sources'), undefined, 1, true)
-    // show user the diff.patch
-    const doc = await vscode.workspace.openTextDocument(clientInstructionsPath)
-    await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One })
+    const diffContents = await fs.readFileText(clientInstructionsPath)
+    if (diffContents.trim()) {
+        const diffModel = new DiffModel()
+        diffModel.parseDiff(clientInstructionsPath, path.join(destinationPath, 'sources'), true)
+        // show user the diff.patch
+        const doc = await vscode.workspace.openTextDocument(clientInstructionsPath)
+        await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One })
+    } else {
+        // still need to set the project copy so that we can use it below
+        transformByQState.setProjectCopyFilePath(path.join(destinationPath, 'sources'))
+        getLogger().info(`CodeTransformation: diff.patch is empty`)
+    }
     await runClientSideBuild(transformByQState.getProjectCopyFilePath(), artifactId)
 }
 
-export async function runClientSideBuild(projectCopyPath: string, clientInstructionArtifactId: string) {
+export async function runClientSideBuild(projectCopyDir: string, clientInstructionArtifactId: string) {
     const baseCommand = transformByQState.getMavenName()
-    const args = []
+    const args = ['clean']
     if (transformByQState.getCustomBuildCommand() === CodeWhispererConstants.skipUnitTestsBuildCommand) {
         args.push('test-compile')
     } else {
@@ -807,22 +852,22 @@ export async function runClientSideBuild(projectCopyPath: string, clientInstruct
 
     const argString = args.join(' ')
     const spawnResult = spawnSync(baseCommand, args, {
-        cwd: projectCopyPath,
+        cwd: projectCopyDir,
         shell: true,
         encoding: 'utf-8',
         env: environment,
     })
 
-    const buildLogs = `Intermediate build result from running ${baseCommand} ${argString}:\n\n${spawnResult.stdout}`
+    const buildLogs = `Intermediate build result from running mvn ${argString}:\n\n${spawnResult.stdout}`
     transformByQState.clearBuildLog()
     transformByQState.appendToBuildLog(buildLogs)
     await writeAndShowBuildLogs()
 
-    const uploadZipBaseDir = path.join(
+    const uploadZipDir = path.join(
         os.tmpdir(),
         `clientInstructionsResult_${transformByQState.getJobId()}_${clientInstructionArtifactId}`
     )
-    const uploadZipPath = await createLocalBuildUploadZip(uploadZipBaseDir, spawnResult.status, spawnResult.stdout)
+    const uploadZipPath = await createLocalBuildUploadZip(uploadZipDir, spawnResult.status, spawnResult.stdout)
 
     // upload build results
     const uploadContext: UploadContext = {
@@ -835,10 +880,33 @@ export async function runClientSideBuild(projectCopyPath: string, clientInstruct
     try {
         await uploadPayload(uploadZipPath, AuthUtil.instance.regionProfileManager.activeRegionProfile, uploadContext)
         await resumeTransformationJob(transformByQState.getJobId(), 'COMPLETED')
+    } catch (err: any) {
+        getLogger().error(`CodeTransformation: upload client build results / resumeTransformation error = %O`, err)
+        transformByQState.setJobFailureErrorChatMessage(
+            `${CodeWhispererConstants.failedToCompleteJobGenericChatMessage} ${err.message}`
+        )
+        transformByQState.setJobFailureErrorNotification(
+            `${CodeWhispererConstants.failedToCompleteJobGenericNotification} ${err.message}`
+        )
+        // in case server-side execution times out, still call resumeTransformationJob
+        if (err.message.includes('find a step in desired state:AWAITING_CLIENT_ACTION')) {
+            getLogger().info('CodeTransformation: resuming job after server-side execution timeout')
+            await resumeTransformationJob(transformByQState.getJobId(), 'COMPLETED')
+        } else {
+            throw err
+        }
     } finally {
-        await fs.delete(projectCopyPath, { recursive: true })
-        await fs.delete(uploadZipBaseDir, { recursive: true })
-        getLogger().info(`CodeTransformation: Just deleted project copy and uploadZipBaseDir after client-side build`)
+        await fs.delete(projectCopyDir, { recursive: true })
+        await fs.delete(uploadZipDir, { recursive: true })
+        await fs.delete(uploadZipPath, { force: true })
+        const exportZipDir = path.join(
+            os.tmpdir(),
+            `downloadClientInstructions_${transformByQState.getJobId()}_${clientInstructionArtifactId}`
+        )
+        await fs.delete(exportZipDir, { recursive: true })
+        getLogger().info(
+            `CodeTransformation: deleted projectCopy, clientInstructionsResult, and downloadClientInstructions directories/files`
+        )
     }
 }
 
