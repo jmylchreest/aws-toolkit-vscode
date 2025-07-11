@@ -16,6 +16,7 @@ import {
     ChatPromptOptionAcknowledgedMessage,
     STOP_CHAT_RESPONSE,
     StopChatResponseMessage,
+    OPEN_FILE_DIALOG,
 } from '@aws/chat-client-ui-types'
 import {
     ChatResult,
@@ -32,6 +33,8 @@ import {
     getSerializedChatRequestType,
     listConversationsRequestType,
     conversationClickRequestType,
+    listMcpServersRequestType,
+    mcpServerClickRequestType,
     ShowSaveFileDialogRequestType,
     ShowSaveFileDialogParams,
     LSPErrorCodes,
@@ -46,19 +49,29 @@ import {
     LINK_CLICK_NOTIFICATION_METHOD,
     LinkClickParams,
     INFO_LINK_CLICK_NOTIFICATION_METHOD,
+    READY_NOTIFICATION_METHOD,
     buttonClickRequestType,
     ButtonClickResult,
     CancellationTokenSource,
     chatUpdateNotificationType,
     ChatUpdateParams,
+    chatOptionsUpdateType,
+    ChatOptionsUpdateParams,
+    listRulesRequestType,
+    ruleClickRequestType,
+    pinnedContextNotificationType,
+    activeEditorChangedNotificationType,
+    ShowOpenDialogRequestType,
+    ShowOpenDialogParams,
+    openFileDialogRequestType,
+    OpenFileDialogResult,
 } from '@aws/language-server-runtimes/protocol'
 import { v4 as uuidv4 } from 'uuid'
 import * as vscode from 'vscode'
 import { Disposable, LanguageClient, Position, TextDocumentIdentifier } from 'vscode-languageclient'
-import * as jose from 'jose'
 import { AmazonQChatViewProvider } from './webviewProvider'
 import { AuthUtil, ReferenceLogViewProvider } from 'aws-core-vscode/codewhisperer'
-import { amazonQDiffScheme, AmazonQPromptSettings, messages, openUrl } from 'aws-core-vscode/shared'
+import { amazonQDiffScheme, AmazonQPromptSettings, messages, openUrl, isTextEditor } from 'aws-core-vscode/shared'
 import {
     DefaultAmazonQAppInitContext,
     messageDispatcher,
@@ -68,6 +81,32 @@ import {
 } from 'aws-core-vscode/amazonq'
 import { telemetry, TelemetryBase } from 'aws-core-vscode/telemetry'
 import { isValidResponseError } from './error'
+import { decryptResponse, encryptRequest } from '../encryption'
+import { getCursorState } from '../utils'
+import { focusAmazonQPanel } from './commands'
+
+export function registerActiveEditorChangeListener(languageClient: LanguageClient) {
+    let debounceTimer: NodeJS.Timeout | undefined
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (debounceTimer) {
+            clearTimeout(debounceTimer)
+        }
+        debounceTimer = setTimeout(() => {
+            let textDocument = undefined
+            let cursorState = undefined
+            if (editor) {
+                textDocument = {
+                    uri: editor.document.uri.toString(),
+                }
+                cursorState = getCursorState(editor.selections)
+            }
+            languageClient.sendNotification(activeEditorChangedNotificationType.method, {
+                textDocument,
+                cursorState,
+            })
+        }, 100)
+    })
+}
 
 export function registerLanguageServerEventListener(languageClient: LanguageClient, provider: AmazonQChatViewProvider) {
     languageClient.info(
@@ -82,36 +121,15 @@ export function registerLanguageServerEventListener(languageClient: LanguageClie
         chatOptions.quickActions.quickActionsCommandGroups[0].groupName = 'Quick Actions'
     }
 
-    provider.onDidResolveWebview(() => {
-        void provider.webview?.postMessage({
-            command: CHAT_OPTIONS,
-            params: chatOptions,
-        })
-    })
-
     // This passes through metric data from LSP events to Toolkit telemetry with all fields from the LSP server
     languageClient.onTelemetry((e) => {
         const telemetryName: string = e.name
 
         if (telemetryName in telemetry) {
+            languageClient.info(`[VSCode Telemetry] Emitting ${telemetryName} telemetry: ${JSON.stringify(e.data)}`)
             telemetry[telemetryName as keyof TelemetryBase].emit(e.data)
         }
     })
-}
-
-function getCursorState(selection: readonly vscode.Selection[]) {
-    return selection.map((s) => ({
-        range: {
-            start: {
-                line: s.start.line,
-                character: s.start.character,
-            },
-            end: {
-                line: s.end.line,
-                character: s.end.character,
-            },
-        },
-    }))
 }
 
 export function registerMessageListeners(
@@ -120,6 +138,10 @@ export function registerMessageListeners(
     encryptionKey: Buffer
 ) {
     const chatStreamTokens = new Map<string, CancellationTokenSource>() // tab id -> token
+
+    // Keep track of pending chat options to send when webview UI is ready
+    const pendingChatOptions = languageClient.initializeResult?.awsServerCapabilities?.chatOptions
+
     provider.webview?.onDidReceiveMessage(async (message) => {
         languageClient.info(`[VSCode Client]  Received ${JSON.stringify(message)} from chat`)
 
@@ -133,7 +155,33 @@ export function registerMessageListeners(
         }
 
         const webview = provider.webview
+
         switch (message.command) {
+            // Handle "aws/chat/ready" event
+            case READY_NOTIFICATION_METHOD:
+                languageClient.info(`[VSCode Client] "aws/chat/ready" event is received, sending chat options`)
+                if (webview && pendingChatOptions) {
+                    try {
+                        await webview.postMessage({
+                            command: CHAT_OPTIONS,
+                            params: pendingChatOptions,
+                        })
+
+                        // Display a more readable representation of quick actions
+                        const quickActionCommands =
+                            pendingChatOptions?.quickActions?.quickActionsCommandGroups?.[0]?.commands || []
+                        const quickActionsDisplay = quickActionCommands.map((cmd: any) => cmd.command).join(', ')
+                        languageClient.info(
+                            `[VSCode Client] Chat options flags: mcpServers=${pendingChatOptions?.mcpServers}, history=${pendingChatOptions?.history}, export=${pendingChatOptions?.export}, quickActions=[${quickActionsDisplay}]`
+                        )
+                        languageClient.sendNotification(message.command, message.params)
+                    } catch (err) {
+                        languageClient.error(
+                            `[VSCode Client] Failed to send CHAT_OPTIONS after "aws/chat/ready" event: ${(err as Error).message}`
+                        )
+                    }
+                }
+                break
             case COPY_TO_CLIPBOARD:
                 languageClient.info('[VSCode Client] Copy to clipboard event received')
                 try {
@@ -219,21 +267,12 @@ export function registerMessageListeners(
                 const cancellationToken = new CancellationTokenSource()
                 chatStreamTokens.set(chatParams.tabId, cancellationToken)
 
-                const chatDisposable = languageClient.onProgress(
-                    chatRequestType,
-                    partialResultToken,
-                    (partialResult) => {
-                        // Store the latest partial result
-                        if (typeof partialResult === 'string' && encryptionKey) {
-                            void decodeRequest<ChatResult>(partialResult, encryptionKey).then(
-                                (decoded) => (lastPartialResult = decoded)
-                            )
-                        } else {
-                            lastPartialResult = partialResult as ChatResult
+                const chatDisposable = languageClient.onProgress(chatRequestType, partialResultToken, (partialResult) =>
+                    handlePartialResult<ChatResult>(partialResult, encryptionKey, provider, chatParams.tabId).then(
+                        (result) => {
+                            lastPartialResult = result
                         }
-
-                        void handlePartialResult<ChatResult>(partialResult, encryptionKey, provider, chatParams.tabId)
-                    }
+                    )
                 )
 
                 const editor =
@@ -282,6 +321,19 @@ export function registerMessageListeners(
                 }
                 break
             }
+            case OPEN_FILE_DIALOG: {
+                // openFileDialog is the event emitted from webView to open
+                // file system
+                const result = await languageClient.sendRequest<OpenFileDialogResult>(
+                    openFileDialogRequestType.method,
+                    message.params
+                )
+                void provider.webview?.postMessage({
+                    command: openFileDialogRequestType.method,
+                    params: result,
+                })
+                break
+            }
             case quickActionRequestType.method: {
                 const quickActionPartialResultToken = uuidv4()
                 const quickActionDisposable = languageClient.onProgress(
@@ -310,8 +362,12 @@ export function registerMessageListeners(
                 )
                 break
             }
+            case listRulesRequestType.method:
+            case ruleClickRequestType.method:
             case listConversationsRequestType.method:
             case conversationClickRequestType.method:
+            case listMcpServersRequestType.method:
+            case mcpServerClickRequestType.method:
             case tabBarActionRequestType.method:
                 await resolveChatResponse(message.command, message.params, languageClient, webview)
                 break
@@ -327,7 +383,7 @@ export function registerMessageListeners(
                 )
                 if (!buttonResult.success) {
                     languageClient.error(
-                        `[VSCode Client] Failed to execute action associated with button with reason: ${buttonResult.failureReason}`
+                        `[VSCode Client] Failed to execute button action: ${buttonResult.failureReason}`
                     )
                 }
                 break
@@ -423,11 +479,46 @@ export function registerMessageListeners(
         }
     })
 
+    languageClient.onRequest(ShowOpenDialogRequestType.method, async (params: ShowOpenDialogParams) => {
+        try {
+            const uris = await vscode.window.showOpenDialog({
+                canSelectFiles: params.canSelectFiles ?? true,
+                canSelectFolders: params.canSelectFolders ?? false,
+                canSelectMany: params.canSelectMany ?? false,
+                filters: params.filters,
+                defaultUri: params.defaultUri ? vscode.Uri.parse(params.defaultUri, false) : undefined,
+                title: params.title,
+            })
+            const urisString = uris?.map((uri) => uri.fsPath)
+            return { uris: urisString || [] }
+        } catch (err) {
+            languageClient.error(`[VSCode Client] Failed to open file dialog: ${(err as Error).message}`)
+            return { uris: [] }
+        }
+    })
+
     languageClient.onRequest<ShowDocumentParams, ShowDocumentResult>(
         ShowDocumentRequest.method,
         async (params: ShowDocumentParams): Promise<ShowDocumentParams | ResponseError<ShowDocumentResult>> => {
+            focusAmazonQPanel().catch((e) => languageClient.error(`[VSCode Client] focusAmazonQPanel() failed`))
+
             try {
                 const uri = vscode.Uri.parse(params.uri)
+
+                if (params.external) {
+                    // Note: Not using openUrl() because we probably don't want telemetry for these URLs.
+                    // Also it doesn't yet support the required HACK below.
+
+                    // HACK: workaround vscode bug: https://github.com/microsoft/vscode/issues/85930
+                    vscode.env.openExternal(params.uri as any).then(undefined, (e) => {
+                        // TODO: getLogger('?').error('failed vscode.env.openExternal: %O', e)
+                        vscode.env.openExternal(uri).then(undefined, (e) => {
+                            // TODO: getLogger('?').error('failed vscode.env.openExternal: %O', e)
+                        })
+                    })
+                    return params
+                }
+
                 const doc = await vscode.workspace.openTextDocument(uri)
                 await vscode.window.showTextDocument(doc, { preview: false })
                 return params
@@ -446,6 +537,20 @@ export function registerMessageListeners(
             params: params,
         })
     })
+    languageClient.onNotification(
+        pinnedContextNotificationType.method,
+        (params: ContextCommandParams & { tabId: string; textDocument?: TextDocumentIdentifier }) => {
+            const editor = vscode.window.activeTextEditor
+            let textDocument = undefined
+            if (editor && isTextEditor(editor)) {
+                textDocument = { uri: vscode.workspace.asRelativePath(editor.document.uri) }
+            }
+            void provider.webview?.postMessage({
+                command: pinnedContextNotificationType.method,
+                params: { ...params, textDocument },
+            })
+        }
+    )
 
     languageClient.onNotification(openFileDiffNotificationType.method, async (params: OpenFileDiffParams) => {
         const ecc = new EditorContentController()
@@ -481,33 +586,17 @@ export function registerMessageListeners(
             params: params,
         })
     })
+
+    languageClient.onNotification(chatOptionsUpdateType.method, (params: ChatOptionsUpdateParams) => {
+        void provider.webview?.postMessage({
+            command: chatOptionsUpdateType.method,
+            params: params,
+        })
+    })
 }
 
 function isServerEvent(command: string) {
     return command.startsWith('aws/chat/') || command === 'telemetry/event'
-}
-
-async function encryptRequest<T>(params: T, encryptionKey: Buffer): Promise<{ message: string } | T> {
-    const payload = new TextEncoder().encode(JSON.stringify(params))
-
-    const encryptedMessage = await new jose.CompactEncrypt(payload)
-        .setProtectedHeader({ alg: 'dir', enc: 'A256GCM' })
-        .encrypt(encryptionKey)
-
-    return { message: encryptedMessage }
-}
-
-async function decodeRequest<T>(request: string, key: Buffer): Promise<T> {
-    const result = await jose.jwtDecrypt(request, key, {
-        clockTolerance: 60, // Allow up to 60 seconds to account for clock differences
-        contentEncryptionAlgorithms: ['A256GCM'],
-        keyManagementAlgorithms: ['dir'],
-    })
-
-    if (!result.payload) {
-        throw new Error('JWT payload not found')
-    }
-    return result.payload as T
 }
 
 /**
@@ -519,10 +608,7 @@ async function handlePartialResult<T extends ChatResult>(
     provider: AmazonQChatViewProvider,
     tabId: string
 ) {
-    const decryptedMessage =
-        typeof partialResult === 'string' && encryptionKey
-            ? await decodeRequest<T>(partialResult, encryptionKey)
-            : (partialResult as T)
+    const decryptedMessage = await decryptResponse<T>(partialResult, encryptionKey)
 
     if (decryptedMessage.body !== undefined) {
         void provider.webview?.postMessage({
@@ -532,6 +618,7 @@ async function handlePartialResult<T extends ChatResult>(
             tabId: tabId,
         })
     }
+    return decryptedMessage
 }
 
 /**
@@ -545,8 +632,8 @@ async function handleCompleteResult<T extends ChatResult>(
     tabId: string,
     disposable: Disposable
 ) {
-    const decryptedMessage =
-        typeof result === 'string' && encryptionKey ? await decodeRequest<T>(result, encryptionKey) : (result as T)
+    const decryptedMessage = await decryptResponse<T>(result, encryptionKey)
+
     void provider.webview?.postMessage({
         command: chatRequestType.method,
         params: decryptedMessage,

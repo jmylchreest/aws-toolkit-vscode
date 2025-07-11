@@ -28,6 +28,7 @@ import {
     zipCode,
     getTableMapping,
     getFilesRecursively,
+    getJobStatisticsHtml,
 } from '../../../codewhisperer/service/transformByQ/transformApiHandler'
 import {
     validateOpenProjects,
@@ -52,18 +53,21 @@ import * as nodefs from 'fs' // eslint-disable-line no-restricted-imports
 describe('transformByQ', function () {
     let fetchStub: sinon.SinonStub
     let tempDir: string
-    const validCustomVersionsFile = `name: "custom-dependency-management"
+    const validCustomVersionsFile = `name: "dependency-upgrade"
 description: "Custom dependency version management for Java migration from JDK 8/11/17 to JDK 17/21"
 dependencyManagement:
   dependencies:
     - identifier: "com.example:library1"
-        targetVersion: "2.1.0"
-        versionProperty: "library1.version"
-        originType: "FIRST_PARTY"
+      targetVersion: "2.1.0"
+      versionProperty: "library1.version"  # Optional
+      originType: "FIRST_PARTY" # or "THIRD_PARTY"
+    - identifier: "com.example:library2"
+      targetVersion: "3.0.0"
+      originType: "THIRD_PARTY"
   plugins:
-    - identifier: "com.example.plugin"
-        targetVersion: "1.2.0"
-        versionProperty: "plugin.version"`
+    - identifier: "com.example:plugin"
+      targetVersion: "1.2.0"
+      versionProperty: "plugin.version"  # Optional`
 
     const validSctFile = `<?xml version="1.0" encoding="UTF-8"?>
     <tree>
@@ -118,6 +122,7 @@ dependencyManagement:
     })
 
     afterEach(async function () {
+        fetchStub.restore()
         sinon.restore()
         await fs.delete(tempDir, { recursive: true })
     })
@@ -247,7 +252,25 @@ dependencyManagement:
             },
             transformationJob: { status: 'COMPLETED' },
         }
+        const mockPlanResponse = {
+            $response: {
+                data: {
+                    transformationPlan: { transformationSteps: [] },
+                },
+                requestId: 'requestId',
+                hasNextPage: () => false,
+                error: undefined,
+                nextPage: () => null, // eslint-disable-line unicorn/no-null
+                redirectCount: 0,
+                retryCount: 0,
+                httpResponse: new HttpResponse(),
+            },
+            transformationPlan: { transformationSteps: [] },
+        }
         sinon.stub(codeWhisperer.codeWhispererClient, 'codeModernizerGetCodeTransformation').resolves(mockJobResponse)
+        sinon
+            .stub(codeWhisperer.codeWhispererClient, 'codeModernizerGetCodeTransformationPlan')
+            .resolves(mockPlanResponse)
         transformByQState.setToSucceeded()
         const status = await pollTransformationJob(
             'dummyId',
@@ -292,6 +315,31 @@ dependencyManagement:
             'Content-Type': 'application/zip',
         }
         assert.deepStrictEqual(actual, expected)
+    })
+
+    it('WHEN showing plan statistics THEN correct labels appear', () => {
+        const mockJobStatistics = [
+            {
+                name: 'linesOfCode',
+                value: '1234',
+            },
+            {
+                name: 'plannedDependencyChanges',
+                value: '0',
+            },
+            {
+                name: 'plannedDeprecatedApiChanges',
+                value: '0',
+            },
+            {
+                name: 'plannedFileChanges',
+                value: '0',
+            },
+        ]
+        const result = getJobStatisticsHtml(mockJobStatistics)
+        assert.strictEqual(result.includes('Lines of code in your application'), true)
+        assert.strictEqual(result.includes('to be replaced'), false)
+        assert.strictEqual(result.includes('to be changed'), false)
     })
 
     it(`WHEN transforming a project with a Windows Maven executable THEN mavenName set correctly`, async function () {
@@ -361,7 +409,6 @@ dependencyManagement:
                 path: tempDir,
                 name: tempFileName,
             },
-            humanInTheLoopFlag: false,
             projectPath: tempDir,
             zipManifest: transformManifest,
         }).then((zipCodeResult) => {
@@ -374,6 +421,8 @@ dependencyManagement:
             const manifestText = manifestBuffer.toString('utf8')
             const manifest = JSON.parse(manifestText)
             assert.strictEqual(manifest.customBuildCommand, CodeWhispererConstants.skipUnitTestsBuildCommand)
+            assert.strictEqual(manifest.noInteractiveMode, true)
+            assert.strictEqual(manifest.transformCapabilities.includes('SELECTIVE_TRANSFORMATION_V2'), true)
         })
     })
 
@@ -416,7 +465,7 @@ dependencyManagement:
         ]
 
         for (const folder of m2Folders) {
-            const folderPath = path.join(tempDir, folder)
+            const folderPath = path.join(tempDir, 'dependencies', folder)
             await fs.mkdir(folderPath)
             for (const file of filesToAdd) {
                 await fs.writeFile(path.join(folderPath, file), 'sample content for the test file')
@@ -430,7 +479,6 @@ dependencyManagement:
                 path: tempDir,
                 name: tempFileName,
             },
-            humanInTheLoopFlag: false,
             projectPath: tempDir,
             zipManifest: new ZipManifest(),
         }).then((zipCodeResult) => {
@@ -488,12 +536,18 @@ dependencyManagement:
 
         const actual = getTableMapping(stepZeroProgressUpdates)
         const expected = {
-            '0': '{"columnNames":["name","value"],"rows":[{"name":"Lines of code in your application","value":"3000"},{"name":"Dependencies to be replaced","value":"5"},{"name":"Deprecated code instances to be replaced","value":"10"},{"name":"Files to be updated","value":"7"}]}',
-            '1-dependency-change-abc':
+            '0': [
+                '{"columnNames":["name","value"],"rows":[{"name":"Lines of code in your application","value":"3000"},{"name":"Dependencies to be replaced","value":"5"},{"name":"Deprecated code instances to be replaced","value":"10"},{"name":"Files to be updated","value":"7"}]}',
+            ],
+            '1-dependency-change-abc': [
                 '{"columnNames":["dependencyName","action","currentVersion","targetVersion"],"rows":[{"dependencyName":"org.springboot.com","action":"Update","currentVersion":"2.1","targetVersion":"2.4"}, {"dependencyName":"com.lombok.java","action":"Remove","currentVersion":"1.7","targetVersion":"-"}]}',
-            '2-deprecated-code-xyz':
+            ],
+            '2-deprecated-code-xyz': [
                 '{"columnNames":["apiFullyQualifiedName","numChangedFiles"],“rows”:[{"apiFullyQualifiedName":"java.lang.Thread.stop()","numChangedFiles":"6"}, {"apiFullyQualifiedName":"java.math.bad()","numChangedFiles":"3"}]}',
-            '-1': '{"columnNames":["relativePath","action"],"rows":[{"relativePath":"pom.xml","action":"Update"}, {"relativePath":"src/main/java/com/bhoruka/bloodbank/BloodbankApplication.java","action":"Update"}]}',
+            ],
+            '-1': [
+                '{"columnNames":["relativePath","action"],"rows":[{"relativePath":"pom.xml","action":"Update"}, {"relativePath":"src/main/java/com/bhoruka/bloodbank/BloodbankApplication.java","action":"Update"}]}',
+            ],
         }
         assert.deepStrictEqual(actual, expected)
     })
@@ -610,7 +664,6 @@ dependencyManagement:
                 message: expectedMessage,
             }
         )
-        sinon.assert.callCount(fetchStub, 4)
     })
 
     it('should not retry upload on non-retriable error', async () => {

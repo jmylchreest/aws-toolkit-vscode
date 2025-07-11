@@ -5,7 +5,6 @@
 
 import vscode, { env, version } from 'vscode'
 import * as nls from 'vscode-nls'
-import * as crypto from 'crypto'
 import { LanguageClient, LanguageClientOptions, RequestType, State } from 'vscode-languageclient'
 import { InlineCompletionManager } from '../app/inline/completion'
 import { AmazonQLspAuth, encryptionKey, notificationTypes } from './auth'
@@ -13,14 +12,17 @@ import {
     CreateFilesParams,
     DeleteFilesParams,
     DidChangeWorkspaceFoldersParams,
-    DidSaveTextDocumentParams,
     GetConfigurationFromServerParams,
     RenameFilesParams,
     ResponseMessage,
-    updateConfigurationRequestType,
     WorkspaceFolder,
 } from '@aws/language-server-runtimes/protocol'
-import { AuthUtil, CodeWhispererSettings, getSelectedCustomization } from 'aws-core-vscode/codewhisperer'
+import {
+    AuthUtil,
+    CodeWhispererSettings,
+    getSelectedCustomization,
+    TelemetryHelper,
+} from 'aws-core-vscode/codewhisperer'
 import {
     Settings,
     createServerOptions,
@@ -32,19 +34,43 @@ import {
     getLogger,
     undefinedIfEmpty,
     getOptOutPreference,
-    isAmazonInternalOs,
-    fs,
+    isAmazonLinux2,
+    getClientId,
+    extensionVersion,
+    isSageMaker,
 } from 'aws-core-vscode/shared'
 import { processUtils } from 'aws-core-vscode/shared'
 import { activate } from './chat/activation'
 import { AmazonQResourcePaths } from './lspInstaller'
-import { ConfigSection, isValidConfigSection, toAmazonQLSPLogLevel } from './config'
+import { ConfigSection, isValidConfigSection, pushConfigUpdate, toAmazonQLSPLogLevel } from './config'
+import { activate as activateInlineChat } from '../inlineChat/activation'
+import { telemetry } from 'aws-core-vscode/telemetry'
+import { SessionManager } from '../app/inline/sessionManager'
+import { LineTracker } from '../app/inline/stateTracker/lineTracker'
+import { InlineTutorialAnnotation } from '../app/inline/tutorials/inlineTutorialAnnotation'
+import { InlineChatTutorialAnnotation } from '../app/inline/tutorials/inlineChatTutorialAnnotation'
 
 const localize = nls.loadMessageBundle()
 const logger = getLogger('amazonqLsp.lspClient')
 
-export async function hasGlibcPatch(): Promise<boolean> {
-    return await fs.exists('/opt/vsc-sysroot/lib64/ld-linux-x86-64.so.2')
+export function hasGlibcPatch(): boolean {
+    // Skip GLIBC patching for SageMaker environments
+    if (isSageMaker()) {
+        getLogger('amazonqLsp').info('SageMaker environment detected in hasGlibcPatch, skipping GLIBC patching')
+        return false // Return false to ensure SageMaker doesn't try to use GLIBC patching
+    }
+
+    // Check for environment variables (for CDM)
+    const glibcLinker = process.env.VSCODE_SERVER_CUSTOM_GLIBC_LINKER || ''
+    const glibcPath = process.env.VSCODE_SERVER_CUSTOM_GLIBC_PATH || ''
+
+    if (glibcLinker.length > 0 && glibcPath.length > 0) {
+        getLogger('amazonqLsp').info('GLIBC patching environment variables detected')
+        return true
+    }
+
+    // No environment variables, no patching needed
+    return false
 }
 
 export async function startLanguageServer(
@@ -69,14 +95,24 @@ export async function startLanguageServer(
     const traceServerEnabled = Settings.instance.isSet(`${clientId}.trace.server`)
     let executable: string[] = []
     // apply the GLIBC 2.28 path to node js runtime binary
-    if (isAmazonInternalOs() && (await hasGlibcPatch())) {
-        executable = [
-            '/opt/vsc-sysroot/lib64/ld-linux-x86-64.so.2',
-            '--library-path',
-            '/opt/vsc-sysroot/lib64',
-            resourcePaths.node,
-        ]
-        getLogger('amazonqLsp').info(`Patched node runtime with GLIBC to ${executable}`)
+    if (isSageMaker()) {
+        // SageMaker doesn't need GLIBC patching
+        getLogger('amazonqLsp').info('SageMaker environment detected, skipping GLIBC patching')
+        executable = [resourcePaths.node]
+    } else if (isAmazonLinux2() && hasGlibcPatch()) {
+        // Use environment variables if available (for CDM)
+        if (process.env.VSCODE_SERVER_CUSTOM_GLIBC_LINKER && process.env.VSCODE_SERVER_CUSTOM_GLIBC_PATH) {
+            executable = [
+                process.env.VSCODE_SERVER_CUSTOM_GLIBC_LINKER,
+                '--library-path',
+                process.env.VSCODE_SERVER_CUSTOM_GLIBC_PATH,
+                resourcePaths.node,
+            ]
+            getLogger('amazonqLsp').info(`Patched node runtime with GLIBC using env vars to ${executable}`)
+        } else {
+            // No environment variables, use the node executable directly
+            executable = [resourcePaths.node]
+        }
     } else {
         executable = [resourcePaths.node]
     }
@@ -118,18 +154,32 @@ export async function startLanguageServer(
                     version: version,
                     extension: {
                         name: 'AmazonQ-For-VSCode',
-                        version: '0.0.1',
+                        version: extensionVersion,
                     },
-                    clientId: crypto.randomUUID(),
+                    clientId: getClientId(globals.globalState),
                 },
                 awsClientCapabilities: {
                     q: {
                         developerProfiles: true,
+                        pinnedContextEnabled: true,
+                        imageContextEnabled: true,
+                        mcp: true,
+                        reroute: true,
+                        modelSelection: true,
+                        workspaceFilePath: vscode.workspace.workspaceFile?.fsPath,
                     },
                     window: {
                         notifications: true,
                         showSaveFileDialog: true,
                     },
+                    textDocument: {
+                        inlineCompletionWithReferences: {
+                            inlineEditSupport: Experiments.instance.isExperimentEnabled('amazonqLSPNEP'),
+                        },
+                    },
+                },
+                contextConfiguration: {
+                    workspaceIdentifier: extensionContext.storageUri?.path,
                 },
                 logLevel: toAmazonQLSPLogLevel(globals.logOutputChannel.logLevel),
             },
@@ -158,120 +208,160 @@ export async function startLanguageServer(
 
     const disposable = client.start()
     toDispose.push(disposable)
+    await client.onReady()
 
+    const auth = await initializeAuth(client)
+
+    await onLanguageServerReady(extensionContext, auth, client, resourcePaths, toDispose)
+
+    return client
+}
+
+async function initializeAuth(client: LanguageClient): Promise<AmazonQLspAuth> {
     const auth = new AmazonQLspAuth(client)
+    await auth.refreshConnection(true)
+    return auth
+}
 
-    return client.onReady().then(async () => {
-        await auth.refreshConnection()
+async function onLanguageServerReady(
+    extensionContext: vscode.ExtensionContext,
+    auth: AmazonQLspAuth,
+    client: LanguageClient,
+    resourcePaths: AmazonQResourcePaths,
+    toDispose: vscode.Disposable[]
+) {
+    const sessionManager = new SessionManager()
 
-        if (Experiments.instance.get('amazonqLSPInline', false)) {
-            const inlineManager = new InlineCompletionManager(client)
-            inlineManager.registerInlineCompletion()
-            toDispose.push(
-                inlineManager,
-                Commands.register({ id: 'aws.amazonq.invokeInlineCompletion', autoconnect: true }, async () => {
-                    await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger')
-                }),
-                vscode.workspace.onDidCloseTextDocument(async () => {
-                    await vscode.commands.executeCommand('aws.amazonq.rejectCodeSuggestion')
-                })
-            )
-        }
+    // keeps track of the line changes
+    const lineTracker = new LineTracker()
 
-        if (Experiments.instance.get('amazonqChatLSP', true)) {
-            await activate(client, encryptionKey, resourcePaths.ui)
-        }
+    // tutorial for inline suggestions
+    const inlineTutorialAnnotation = new InlineTutorialAnnotation(lineTracker, sessionManager)
 
-        const refreshInterval = auth.startTokenRefreshInterval(10 * oneSecond)
+    // tutorial for inline chat
+    const inlineChatTutorialAnnotation = new InlineChatTutorialAnnotation(inlineTutorialAnnotation)
 
-        const sendProfileToLsp = async () => {
-            try {
-                const result = await client.sendRequest(updateConfigurationRequestType.method, {
-                    section: 'aws.q',
-                    settings: {
-                        profileArn: AuthUtil.instance.regionProfileManager.activeRegionProfile?.arn,
-                    },
-                })
-                client.info(
-                    `Client: Updated Amazon Q Profile ${AuthUtil.instance.regionProfileManager.activeRegionProfile?.arn} to Amazon Q LSP`,
-                    result
-                )
-            } catch (err) {
-                client.error('Error when setting Q Developer Profile to Amazon Q LSP', err)
+    const inlineManager = new InlineCompletionManager(client, sessionManager, lineTracker, inlineTutorialAnnotation)
+    inlineManager.registerInlineCompletion()
+    activateInlineChat(extensionContext, client, encryptionKey, inlineChatTutorialAnnotation)
+
+    if (Experiments.instance.get('amazonqChatLSP', true)) {
+        await activate(client, encryptionKey, resourcePaths.ui)
+    }
+
+    const refreshInterval = auth.startTokenRefreshInterval(10 * oneSecond)
+
+    // We manually push the cached values the first time since event handlers, which should push, may not have been setup yet.
+    // Execution order is weird and should be fixed in the flare implementation.
+    // TODO: Revisit if we need this if we setup the event handlers properly
+    if (AuthUtil.instance.isConnectionValid()) {
+        await sendProfileToLsp(client)
+
+        await pushConfigUpdate(client, {
+            type: 'customization',
+            customization: getSelectedCustomization(),
+        })
+    }
+
+    toDispose.push(
+        inlineManager,
+        Commands.register({ id: 'aws.amazonq.invokeInlineCompletion', autoconnect: true }, async () => {
+            await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger')
+        }),
+        Commands.register('aws.amazonq.refreshAnnotation', async (forceProceed: boolean) => {
+            telemetry.record({
+                traceId: TelemetryHelper.instance.traceId,
+            })
+
+            const editor = vscode.window.activeTextEditor
+            if (editor) {
+                if (forceProceed) {
+                    await inlineTutorialAnnotation.refresh(editor, 'codewhisperer', true)
+                } else {
+                    await inlineTutorialAnnotation.refresh(editor, 'codewhisperer')
+                }
             }
-        }
+        }),
+        Commands.register('aws.amazonq.dismissTutorial', async () => {
+            const editor = vscode.window.activeTextEditor
+            if (editor) {
+                inlineTutorialAnnotation.clear()
+                try {
+                    telemetry.ui_click.emit({ elementId: `dismiss_${inlineTutorialAnnotation.currentState.id}` })
+                } catch (_) {}
+                await inlineTutorialAnnotation.dismissTutorial()
+                getLogger().debug(`codewhisperer: user dismiss tutorial.`)
+            }
+        }),
+        vscode.workspace.onDidCloseTextDocument(async () => {
+            await vscode.commands.executeCommand('aws.amazonq.rejectCodeSuggestion')
+        }),
+        AuthUtil.instance.auth.onDidChangeActiveConnection(async () => {
+            await auth.refreshConnection()
+        }),
+        AuthUtil.instance.auth.onDidDeleteConnection(async () => {
+            client.sendNotification(notificationTypes.deleteBearerToken.method)
+        }),
+        AuthUtil.instance.regionProfileManager.onDidChangeRegionProfile(() => sendProfileToLsp(client)),
+        vscode.commands.registerCommand('aws.amazonq.getWorkspaceId', async () => {
+            const requestType = new RequestType<GetConfigurationFromServerParams, ResponseMessage, Error>(
+                'aws/getConfigurationFromServer'
+            )
+            const workspaceIdResp = await client.sendRequest(requestType.method, {
+                section: 'aws.q.workspaceContext',
+            })
+            return workspaceIdResp
+        }),
+        vscode.workspace.onDidCreateFiles((e) => {
+            client.sendNotification('workspace/didCreateFiles', {
+                files: e.files.map((it) => {
+                    return { uri: it.fsPath }
+                }),
+            } as CreateFilesParams)
+        }),
+        vscode.workspace.onDidDeleteFiles((e) => {
+            client.sendNotification('workspace/didDeleteFiles', {
+                files: e.files.map((it) => {
+                    return { uri: it.fsPath }
+                }),
+            } as DeleteFilesParams)
+        }),
+        vscode.workspace.onDidRenameFiles((e) => {
+            client.sendNotification('workspace/didRenameFiles', {
+                files: e.files.map((it) => {
+                    return { oldUri: it.oldUri.fsPath, newUri: it.newUri.fsPath }
+                }),
+            } as RenameFilesParams)
+        }),
+        vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+            client.sendNotification('workspace/didChangeWorkspaceFolder', {
+                event: {
+                    added: e.added.map((it) => {
+                        return {
+                            name: it.name,
+                            uri: it.uri.fsPath,
+                        } as WorkspaceFolder
+                    }),
+                    removed: e.removed.map((it) => {
+                        return {
+                            name: it.name,
+                            uri: it.uri.fsPath,
+                        } as WorkspaceFolder
+                    }),
+                },
+            } as DidChangeWorkspaceFoldersParams)
+        }),
+        { dispose: () => clearInterval(refreshInterval) },
+        // Set this inside onReady so that it only triggers on subsequent language server starts (not the first)
+        onServerRestartHandler(client, auth)
+    )
 
-        // send profile to lsp once.
-        void sendProfileToLsp()
-
-        toDispose.push(
-            AuthUtil.instance.auth.onDidChangeActiveConnection(async () => {
-                await auth.refreshConnection()
-            }),
-            AuthUtil.instance.auth.onDidDeleteConnection(async () => {
-                client.sendNotification(notificationTypes.deleteBearerToken.method)
-            }),
-            AuthUtil.instance.regionProfileManager.onDidChangeRegionProfile(sendProfileToLsp),
-            vscode.commands.registerCommand('aws.amazonq.getWorkspaceId', async () => {
-                const requestType = new RequestType<GetConfigurationFromServerParams, ResponseMessage, Error>(
-                    'aws/getConfigurationFromServer'
-                )
-                const workspaceIdResp = await client.sendRequest(requestType.method, {
-                    section: 'aws.q.workspaceContext',
-                })
-                return workspaceIdResp
-            }),
-            vscode.workspace.onDidCreateFiles((e) => {
-                client.sendNotification('workspace/didCreateFiles', {
-                    files: e.files.map((it) => {
-                        return { uri: it.fsPath }
-                    }),
-                } as CreateFilesParams)
-            }),
-            vscode.workspace.onDidDeleteFiles((e) => {
-                client.sendNotification('workspace/didDeleteFiles', {
-                    files: e.files.map((it) => {
-                        return { uri: it.fsPath }
-                    }),
-                } as DeleteFilesParams)
-            }),
-            vscode.workspace.onDidRenameFiles((e) => {
-                client.sendNotification('workspace/didRenameFiles', {
-                    files: e.files.map((it) => {
-                        return { oldUri: it.oldUri.fsPath, newUri: it.newUri.fsPath }
-                    }),
-                } as RenameFilesParams)
-            }),
-            vscode.workspace.onDidSaveTextDocument((e) => {
-                client.sendNotification('workspace/didSaveTextDocument', {
-                    textDocument: {
-                        uri: e.uri.fsPath,
-                    },
-                } as DidSaveTextDocumentParams)
-            }),
-            vscode.workspace.onDidChangeWorkspaceFolders((e) => {
-                client.sendNotification('workspace/didChangeWorkspaceFolder', {
-                    event: {
-                        added: e.added.map((it) => {
-                            return {
-                                name: it.name,
-                                uri: it.uri.fsPath,
-                            } as WorkspaceFolder
-                        }),
-                        removed: e.removed.map((it) => {
-                            return {
-                                name: it.name,
-                                uri: it.uri.fsPath,
-                            } as WorkspaceFolder
-                        }),
-                    },
-                } as DidChangeWorkspaceFoldersParams)
-            }),
-            { dispose: () => clearInterval(refreshInterval) },
-            // Set this inside onReady so that it only triggers on subsequent language server starts (not the first)
-            onServerRestartHandler(client, auth)
-        )
-    })
+    async function sendProfileToLsp(client: LanguageClient) {
+        await pushConfigUpdate(client, {
+            type: 'profile',
+            profileArn: AuthUtil.instance.regionProfileManager.activeRegionProfile?.arn,
+        })
+    }
 }
 
 /**
@@ -284,6 +374,12 @@ function onServerRestartHandler(client: LanguageClient, auth: AmazonQLspAuth) {
         if (!(e.oldState === State.Starting && e.newState === State.Running)) {
             return
         }
+
+        // Emit telemetry that a crash was detected.
+        // It is not guaranteed to 100% be a crash since somehow the server may have been intentionally restarted,
+        // but most of the time it probably will have been due to a crash.
+        // TODO: Port this metric override to common definitions
+        telemetry.languageServer_crash.emit({ id: 'AmazonQ' })
 
         // Need to set the auth token in the again
         await auth.refreshConnection(true)
@@ -322,6 +418,8 @@ function getConfigSection(section: ConfigSection) {
                     includeSuggestionsWithCodeReferences:
                         CodeWhispererSettings.instance.isSuggestionsWithCodeReferencesEnabled(),
                     shareCodeWhispererContentWithAWS: !CodeWhispererSettings.instance.isOptoutEnabled(),
+                    includeImportsWithSuggestions: CodeWhispererSettings.instance.isImportRecommendationEnabled(),
+                    sendUserWrittenCodeMetrics: true,
                 },
             ]
         case 'aws.logLevel':

@@ -18,7 +18,6 @@ export enum ButtonActions {
     CONFIRM_SQL_CONVERSION_TRANSFORMATION_FORM = 'gumbySQLConversionTransformFormConfirm',
     CANCEL_TRANSFORMATION_FORM = 'gumbyTransformFormCancel', // shared between Language Upgrade & SQL Conversion
     CONFIRM_SKIP_TESTS_FORM = 'gumbyTransformSkipTestsFormConfirm',
-    CONFIRM_SELECTIVE_TRANSFORMATION_FORM = 'gumbyTransformOneOrMultipleDiffsFormConfirm',
     SELECT_SQL_CONVERSION_METADATA_FILE = 'gumbySQLConversionMetadataTransformFormConfirm',
     SELECT_CUSTOM_DEPENDENCY_VERSION_FILE = 'gumbyCustomDependencyVersionTransformFormConfirm',
     CONTINUE_TRANSFORMATION_FORM = 'gumbyTransformFormContinue',
@@ -38,7 +37,7 @@ export enum GumbyCommands {
 
 export default class MessengerUtils {
     static createJavaHomePrompt = (jdkVersion: JDKVersion | undefined): string => {
-        let javaHomePrompt = `${CodeWhispererConstants.enterJavaHomeChatMessage} ${jdkVersion}. \n`
+        let javaHomePrompt = `${CodeWhispererConstants.enterJavaHomeChatMessage} ${jdkVersion}.\n\n`
         if (os.platform() === 'win32') {
             javaHomePrompt += CodeWhispererConstants.windowsJavaHomeHelpChatMessage
         } else if (os.platform() === 'darwin') {

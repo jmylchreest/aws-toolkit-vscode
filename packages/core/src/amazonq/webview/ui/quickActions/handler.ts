@@ -177,15 +177,6 @@ export class QuickActionHandler {
             return
         }
 
-        /**
-         * right click -> generate test has no tab id
-         * we have to manually create one if a testgen tab
-         * wasn't previously created
-         */
-        if (!tabID) {
-            tabID = this.mynahUI.updateStore('', {})
-        }
-
         // if there is no test tab, open a new one
         const affectedTabId: string | undefined = this.addTab(tabID)
 
@@ -308,6 +299,12 @@ export class QuickActionHandler {
         if (gumbyTabId !== undefined) {
             this.mynahUI.selectTab(gumbyTabId, eventId || '')
             this.connector.onTabChange(gumbyTabId)
+            this.mynahUI.notify({
+                duration: 5000,
+                title: 'Q CodeTransformation',
+                content:
+                    "Switched to the existing /transform tab; click 'Start a new transformation' below to run another transformation",
+            })
             return
         }
 
@@ -355,6 +352,8 @@ export class QuickActionHandler {
                 loadingChat: true,
                 cancelButtonWhenLoading: false,
             })
+        } else {
+            this.mynahUI.updateStore(affectedTabId, { promptInputOptions: [], promptTopBarTitle: '' })
         }
 
         if (affectedTabId && this.isHybridChatEnabled) {

@@ -42,6 +42,7 @@ import {
     createGettingStarted,
     createGitHubNode,
     createLearnMore,
+    createManageSubscription,
     createOpenReferenceLog,
     createReconnect,
     createSecurityScan,
@@ -56,7 +57,7 @@ import { waitUntil } from '../../../shared/utilities/timeoutUtils'
 import { listCodeWhispererCommands } from '../../../codewhisperer/ui/statusBarMenu'
 import { CodeScanIssue, CodeScansState, CodeSuggestionsState, codeScanState } from '../../../codewhisperer/models/model'
 import { cwQuickPickSource } from '../../../codewhisperer/commands/types'
-import { refreshStatusBar } from '../../../codewhisperer/service/inlineCompletionService'
+import { refreshStatusBar } from '../../../codewhisperer/service/statusBar'
 import { focusAmazonQPanel } from '../../../codewhispererChat/commands/registerCommands'
 import * as diagnosticsProvider from '../../../codewhisperer/service/diagnosticsProvider'
 import { randomUUID } from '../../../shared/crypto'
@@ -515,6 +516,7 @@ describe('CodeWhisperer-basicCommands', function () {
                     ...genericItems(),
                     createSeparator(),
                     createSettingsNode(),
+                    createManageSubscription(),
                     createSignout(),
                 ])
                 e.dispose() // skip needing to select an item to continue
@@ -537,6 +539,7 @@ describe('CodeWhisperer-basicCommands', function () {
                     switchToAmazonQNode(),
                     ...genericItems(),
                     createSettingsNode(),
+                    createManageSubscription(),
                     createSignout()
                 )
                 e.dispose()

@@ -157,47 +157,6 @@ export class Messenger {
         )
     }
 
-    public async sendOneOrMultipleDiffsPrompt(tabID: string) {
-        const formItems: ChatItemFormItem[] = []
-        formItems.push({
-            id: 'GumbyTransformOneOrMultipleDiffsForm',
-            type: 'select',
-            title: CodeWhispererConstants.selectiveTransformationFormTitle,
-            mandatory: true,
-            options: [
-                {
-                    value: CodeWhispererConstants.oneDiffMessage,
-                    label: CodeWhispererConstants.oneDiffMessage,
-                },
-                {
-                    value: CodeWhispererConstants.multipleDiffsMessage,
-                    label: CodeWhispererConstants.multipleDiffsMessage,
-                },
-            ],
-        })
-
-        this.dispatcher.sendAsyncEventProgress(
-            new AsyncEventProgressMessage(tabID, {
-                inProgress: true,
-                message: CodeWhispererConstants.userPatchDescriptionChatMessage(
-                    transformByQState.getTargetJDKVersion() ?? ''
-                ),
-            })
-        )
-
-        this.dispatcher.sendChatPrompt(
-            new ChatPrompt(
-                {
-                    message: 'Q Code Transformation',
-                    formItems: formItems,
-                },
-                'TransformOneOrMultipleDiffsForm',
-                tabID,
-                false
-            )
-        )
-    }
-
     public async sendLanguageUpgradeProjectPrompt(projects: TransformationCandidateProject[], tabID: string) {
         const projectFormOptions: { value: any; label: string }[] = []
         const detectedJavaVersions = new Array<JDKVersion | undefined>()
@@ -451,7 +410,7 @@ export class Messenger {
                 message = CodeWhispererConstants.noPomXmlFoundChatMessage
                 break
             case 'could-not-compile-project':
-                message = CodeWhispererConstants.cleanInstallErrorChatMessage
+                message = CodeWhispererConstants.cleanTestCompileErrorChatMessage
                 break
             case 'invalid-java-home':
                 message = CodeWhispererConstants.noJavaHomeFoundChatMessage
@@ -501,16 +460,14 @@ export class Messenger {
         this.dispatcher.sendCommandMessage(new SendCommandMessage(message.command, message.tabID, message.eventId))
     }
 
-    public sendJobFinishedMessage(tabID: string, message: string, includeStartNewTransformationButton: boolean = true) {
+    public sendJobFinishedMessage(tabID: string, message: string) {
         const buttons: ChatItemButton[] = []
-        if (includeStartNewTransformationButton) {
-            buttons.push({
-                keepCardAfterClick: false,
-                text: CodeWhispererConstants.startTransformationButtonText,
-                id: ButtonActions.CONFIRM_START_TRANSFORMATION_FLOW,
-                disabled: false,
-            })
-        }
+        buttons.push({
+            keepCardAfterClick: false,
+            text: CodeWhispererConstants.startTransformationButtonText,
+            id: ButtonActions.CONFIRM_START_TRANSFORMATION_FLOW,
+            disabled: false,
+        })
 
         if (transformByQState.isPartiallySucceeded() || transformByQState.isSucceeded()) {
             buttons.push({
@@ -595,11 +552,6 @@ export class Messenger {
 
     public sendSkipTestsSelectionMessage(skipTestsSelection: string, tabID: string) {
         const message = `Okay, I will ${skipTestsSelection.toLowerCase()} when building your project.`
-        this.dispatcher.sendChatMessage(new ChatMessage({ message, messageType: 'ai-prompt' }, tabID))
-    }
-
-    public sendOneOrMultipleDiffsMessage(selectiveTransformationSelection: string, tabID: string) {
-        const message = `Okay, I will create ${selectiveTransformationSelection.toLowerCase()} with my proposed changes.`
         this.dispatcher.sendChatMessage(new ChatMessage({ message, messageType: 'ai-prompt' }, tabID))
     }
 
@@ -752,7 +704,10 @@ ${codeSnippet}
     }
 
     public async sendCustomDependencyVersionMessage(tabID: string) {
-        const message = CodeWhispererConstants.chooseYamlMessage
+        let message = CodeWhispererConstants.chooseConfigFileMessageLibraryUpgrade
+        if (transformByQState.getSourceJDKVersion() !== transformByQState.getTargetJDKVersion()) {
+            message = CodeWhispererConstants.chooseConfigFileMessageJdkUpgrade
+        }
         const buttons: ChatItemButton[] = []
 
         buttons.push({
@@ -779,7 +734,7 @@ ${codeSnippet}
                 tabID
             )
         )
-        const sampleYAML = `name: "custom-dependency-management"
+        const sampleYAML = `name: "dependency-upgrade"
 description: "Custom dependency version management for Java migration from JDK 8/11/17 to JDK 17/21"
 
 dependencyManagement:
@@ -787,12 +742,12 @@ dependencyManagement:
     - identifier: "com.example:library1"
       targetVersion: "2.1.0"
       versionProperty: "library1.version"  # Optional
-      originType: "FIRST_PARTY" # or "THIRD_PARTY"  # Optional
+      originType: "FIRST_PARTY" # or "THIRD_PARTY"
     - identifier: "com.example:library2"
       targetVersion: "3.0.0"
       originType: "THIRD_PARTY"
   plugins:
-    - identifier: "com.example.plugin"
+    - identifier: "com.example:plugin"
       targetVersion: "1.2.0"
       versionProperty: "plugin.version"  # Optional`
 
